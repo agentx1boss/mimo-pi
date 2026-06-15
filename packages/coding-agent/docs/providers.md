@@ -18,6 +18,7 @@ Use `/login` in interactive mode, then select a provider:
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
+- Xiaomi MiMo
 
 Use `/logout` to clear credentials. Tokens are stored in `~/.pi/agent/auth.json` and auto-refresh when expired.
 
@@ -34,6 +35,18 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
 - If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
+
+### Xiaomi MiMo
+
+Use `/login xiaomi` to authenticate with the Xiaomi MiMo platform in a browser. Pi opens a MiMo authorize URL with a temporary public key and a localhost callback URL. After browser authorization, MiMo returns an encrypted payload to the callback; Pi decrypts it locally and stores the returned `sk` as the `xiaomi` credential in `~/.pi/agent/auth.json`.
+
+Headless/manual login uses the same flow: copy the displayed MiMo authorize URL, finish authorization in a browser, then paste the returned Code into Pi. If MiMo returns a provider `url`, Pi applies it as the `xiaomi` model base URL for subsequent requests.
+
+Implementation notes:
+
+- The flow mirrors MiMo-Code's `pk`, `redirect_uri`, `kn=mimocode`, and `key_name=mimo-code-cli-key-*` authorization parameters.
+- The payload is encrypted for the CLI-generated X25519 key pair and decrypted locally with AES-256-GCM.
+- Pi stores the result as OAuth-shaped credentials so the existing `/login`, `/logout`, auth refresh, and model registry paths can be reused; `getApiKey()` returns the decrypted `sk`.
 
 ## API Keys
 

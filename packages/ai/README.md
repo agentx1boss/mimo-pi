@@ -1161,8 +1161,22 @@ Several providers require OAuth authentication instead of static API keys:
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
+- **Xiaomi MiMo** (browser authorization through the MiMo platform)
 
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
+
+### Xiaomi MiMo OAuth Flow
+
+The Xiaomi MiMo provider uses the same browser authorization shape as MiMo-Code, but stores the result in Pi's standard OAuth credential store:
+
+1. Generate a temporary X25519 key pair.
+2. Build a MiMo authorize URL with `pk`, `redirect_uri`, `kn=mimocode`, and `key_name=mimo-code-cli-key-*`.
+3. Receive `u=<encrypted_payload>` through the localhost callback, or accept the same encrypted Code from manual paste.
+4. Decrypt the payload locally with X25519 + AES-256-GCM.
+5. Store the returned `sk` as `access`, along with `uid` and optional `baseUrl`.
+6. Return `access` from `getApiKey()` and apply `baseUrl` to built-in `xiaomi` models when present.
+
+This is intentionally registered as provider id `xiaomi`, so callers can use the normal `getOAuthProvider("xiaomi")`, `/login xiaomi`, and model registry paths.
 
 ### Vertex AI
 
