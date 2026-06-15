@@ -1,456 +1,373 @@
-# MiMoCode 核心功能重写开发计划（基于 Pi fork）
+# MiMoCode on Pi 社区插件优先实施计划
 
-> **目标**：在本地 fork 的 `pi/` 仓库上，用 Pi 的 Extension 机制重写 MiMoCode 的核心差异化能力（持久化记忆、检查点、上下文重建、任务追踪、子智能体、Goal 停止条件、Compose、Dream/Distill）。
+> **目标**：在本地 fork 的 `pi/` 仓库上，先用 Pi 社区插件拼出类似 MiMoCode 的编码智能体能力，再只对社区生态未覆盖或不可信的差异化部分做自研。
 >
-> **核心判断**：Pi 是「极简内核 + 可扩展 harness」，MiMoCode 的全部差异化都可表达为一组 Pi Extension。Pi 自带的示例扩展（`custom-compaction.ts` / `handoff.ts` / `todo.ts` / `subagent/` / `summarize.ts`）已经覆盖了相当多的功能骨架，重写是「站在巨人肩膀上做增量」，而非从零开始。
+> **核心判断**：原始“从零实现”蓝图仍然有价值，但它不应再作为默认工程路线。`pi.dev` 当前已经有大规模 Pi packages 生态，记忆、计划、任务、Goal、子智能体、上下文管理、spec-driven workflow 等能力都有多个实现。新的路线是：**插件优先、验收驱动、少量自研**。
 
 ---
 
-## 0. 背景与定位
+## 0. 结论摘要
 
-### 0.1 已确认的 Pi 能力边界
+### 0.1 当前判断
 
-通过阅读 `pi/packages/coding-agent/` 的源码与文档，确认 Pi 提供以下基础设施，可直接复用：
+- `MIMOCODE_PLAN.zh.md` 从“从零实现计划”重构为“社区插件优先的选型与差异化实施计划”。
+- P1-P4 的大部分能力不再默认自研，先通过社区插件评测和组合获得。
+- 仍建议自研的核心差异化：
+  - **MiMo Provider**：接入 Xiaomi MiMo API Key / OAuth，作为模型通路和产品身份基础。
+  - **Dream/Distill 自我进化闭环**：会话扫描、知识沉淀、重复 workflow 挖掘、生成 skill/subagent/command、人工审核应用。
+- 旧计划中的架构设计和验收标准保留为 fallback 标准：如果社区插件无法通过验收，再按原设计补齐或重写。
 
-| Pi 能力 | 复用方式 | 文档/示例 |
-|--------|---------|----------|
-| 会话树状持久化 | JSONL，`id`/`parentId`，`/fork`、`/tree` 原生分支 | `docs/session-format.md` |
-| Compaction（上下文压缩） | 内建压缩 + `session_before_compact` 钩子可完全自定义 | `docs/compaction.md`, `examples/extensions/custom-compaction.ts` |
-| 扩展状态持久化 | `appendCustomEntry()`（不进上下文）/ `appendCustomMessageEntry()`（进上下文） | `docs/extensions.md` §State Management |
-| 自定义工具/命令/快捷键 | `registerTool` / `registerCommand` / `registerShortcut` | `docs/extensions.md` |
-| 独立子会话 | `ctx.newSession({ parentSession })` + spawn `pi` 子进程 | `examples/extensions/handoff.ts`, `examples/extensions/subagent/` |
-| 独立 LLM 调用 | `complete()` from `@earendil-works/pi-ai`，可用不同模型做裁判 | `examples/extensions/custom-compaction.ts` |
-| 任务系统骨架 | `examples/extensions/todo.ts`（状态重建 + 树状分支感知） | `examples/extensions/todo.ts` |
+### 0.2 非目标
 
-### 0.2 重写策略
+- 不为了复刻而复刻，不重复实现社区已有的成熟插件。
+- 不改 Pi 内核，除非后续 spike 证明 Extension API 无法表达关键能力。
+- 不默认安装第三方包到全局配置。调研和试用优先用项目本地 `.pi/settings.json` 或一次性 `pi -e`。
 
-- **不改动 Pi 内核**（`packages/agent` / `packages/ai` / `packages/tui`），只在 `packages/coding-agent/src/extensions/mimo/` 下新增一组 MiMo 扩展包。
-- **每个 MiMo 功能 = 一个独立 extension factory**，可单独 `pi -e` 加载，也可在聚合入口一起加载。
-- **借鉴而不照抄** Pi 示例：示例是最小演示，我们要补齐的是 MiMoCode 的工程质量（SQLite FTS5、token budget、裁判模型、子智能体编排）。
+### 0.3 安全前提
 
-### 0.3 目录结构约定
-
-```
-packages/coding-agent/src/extensions/mimo/
-├── index.ts                 # 聚合入口：默认加载所有 MiMo 扩展
-├── memory/                  # P1 持久化记忆
-├── checkpoint/              # P2 检查点 + 上下文重建
-├── tasks/                   # P2 任务追踪
-├── dream/                   # P3 Dream & Distill（自我进化）
-├── goal/                    # P3 Goal 停止条件
-├── subagent/                # P4 子智能体编排
-├── compose/                 # P4 Compose specs-driven 流程
-└── shared/                  # 共享工具：SQLite store、token 计数、prompt 模板
-```
-
-测试与验收用的示例会话统一放在 `packages/coding-agent/test/mimo/`。
+Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行权限。所有第三方插件必须经过源码审查、版本固定、最小化启用和本地 smoke test 后才进入默认组合。
 
 ---
 
-## P0 — 工程基线（预计 2~3 天）
+## 1. 调研结果
 
-### 目标
-搭建开发闭环，确保后续每个阶段都能「改 → 编译 → 跑通 → 验收」。**前置接入 MiMo Provider**——后续记忆、检查点、Dream 等所有功能都要用真实 MiMo 模型验证，所以先把模型通路打通。
+### 1.1 Pi 生态现状
 
-### 任务
+调研时间：2026-06-15。
 
-- [ ] **0.1 项目骨架**：新建 `packages/coding-agent/src/extensions/mimo/` 目录与 `index.ts` 聚合入口（先空实现，只 `export default function(pi){}`）。
-- [ ] **0.MiMo MiMo Provider 接入**（`extensions/mimo/provider.ts`）—— 后续所有功能开发测试的前置条件
-  - **背景**：Pi 已内建多 Provider 能力（见 `docs/providers.md` / `docs/custom-provider.md`）。我们用 `pi.registerProvider()` 把小米 MiMo 平台接进来，让 `/login` 直接选 MiMo，后续记忆/checkpoint/Dream 等功能即可用真实 MiMo 模型验证。
-  - **方式 A：MiMo API Key**（最简，先行落地）
-    - `pi.registerProvider("mimo", { baseUrl: "https://platform.xiaomimimo.com/...", apiKey: "$MIMO_API_KEY", api: "openai-completions", models: [...] })`
-    - 用户通过环境变量 `MIMO_API_KEY` 或 `.pi/agent/auth.json` 提供 key
-    - 用 async factory 从远程 `/models` 端点拉取 MiMo 模型列表（动态、不写死）
-  - **方式 B：MiMo 平台 OAuth**（产品级体验，紧跟 A 之后）
-    - `oauth: { name, login(callbacks), refreshToken, getApiKey }`，集成进 Pi 原生 `/login` 流程
-    - 实现小米 OAuth 端点的授权码/device-code 交换 + token 刷新
-    - `modifyModels(models, credentials)` 按用户订阅/区域过滤可用模型
-  - 两种方式都注册同一个 provider id `mimo`，OAuth 优先；提供 key 就用 key，登录过就用 OAuth token
-- [ ] **0.2 构建链路验证**：跑通 `npm run build`（顶层 `packages/coding-agent`），确认 dist 产物正常。
-- [ ] **0.3 扩展加载验证**：用 `pi -e ./src/extensions/mimo/index.ts` 启动，确认无报错；写一个 `session_start` 钩子打印日志验证事件通路；**用 MiMo 模型发一条消息验证端到端通路**。
-- [ ] **0.4 测试基线**：在 `test/mimo/` 下放一个最小 vitest 用例，确认 `npm test` 能跑到。
-- [ ] **0.5 配置位预留**：确认 Pi 的 `.pi/settings.json` 能承载 MiMo 配置（`memory.enabled`、`memory.budget` 等），预留 schema；MiMo Provider 配置（`provider.mimo.baseUrl` / OAuth client id 等）也纳入。
+| 来源 | 观察 |
+|------|------|
+| `https://pi.dev/packages` | Package catalog 显示 `1-50 / 3979`，类型包括 `extension`、`skill`、`theme`、`prompt`、`package`。 |
+| `https://pi.dev/` | Pi 官方定位是极简 harness：核心不内置 sub-agents、plan mode、todo、MCP 等能力，鼓励通过 extensions / skills / packages 构建或安装。 |
+| `https://pi.dev/docs/latest/packages` | Pi packages 支持 npm、git、local path；可声明 extensions、skills、prompts、themes；项目本地安装可写入 `.pi/settings.json`。 |
+| `https://pi.dev/docs/latest/extensions` | Extension 可注册 provider、tool、command、shortcut、flag，可监听 session/context/compaction 等事件，TypeScript 通过 `jiti` 直接加载。 |
 
-### 验收标准
+结论：Pi 社区生态已经足够大，`mimo-pi` 不应先投入数周重写通用能力。正确路线是先做插件选型与验收。
+
+### 1.2 能力覆盖矩阵
+
+| MiMoCode 能力 | 社区候选 | 已观察到的能力 | 初步判断 |
+|---------------|----------|----------------|----------|
+| Persistent memory | `pi-hermes-memory`, `pi-memory`, `pi-memctx`, `@samfp/pi-memory`, `@pi-unipi/memory`, `pi-memory-md`, `pi-total-recall` | SQLite FTS5、Markdown memory、semantic/hybrid search、session search、background learning、auto-consolidation 等均已有实现。 | 不从零做 P1；先评测 `pi-hermes-memory`、`pi-memory`、`pi-memctx`。 |
+| Context / compaction / checkpoint | `pi-context-manager`, `pi-vcc`, `pi-continue`, `pi-blackhole`, `pi-observational-memory`, `@remnic/plugin-pi` | tool result distillation、context aging、compaction ledger、algorithmic compaction、observational memory、Remnic checkpoint sync。 | 不从零做 P2；先选一个 context manager，再补 MiMo 语义层。 |
+| Tasks / todo | `@juicesharp/rpiv-todo`, `@0xkobold/pi-task`, `pi-code-planner` | live todo overlay、SQLite task/kanban、persisted planning state。 | 不从零做 task system；评测是否满足分支和 compaction 生存。 |
+| Goal / judge stop | `pi-until-done`, `@ricoyudog/pi-goal-hermes`, `@entelligentsia/pi-ralph`, `@capyup/pi-goal`, `pi-goal-x`, `pi-codex-goal` | `/goal` 或 `/until-done`、cross-model judge、autonomous continuation、预算/turn 管理。 | 不从零做 P3 goal；选型后只做 MiMo 命令别名或配置。 |
+| Subagents | `pi-subagents`, `pi-agents-team`, `pi-crew`, `@gotgenes/pi-subagents`, `pi-fast-subagent`, `simple-subs`, `pi-mesh` | single/parallel/chain/background、RPC workers、live TUI、worktree/async orchestration、peer messaging。 | 不从零做 P4 subagent runtime；先选稳定实现。 |
+| Compose / SDD workflow | `@gonrocca/zero-pi`, `@juicesharp/rpiv-pi`, `@capyup/pi-specs`, `@ifi/pi-spec`, `pi-code-planner`, `pi-mission-control`, `nightmanager` | explore -> plan -> build -> review/verdict、TDD evidence、spec store、PR/issue integration、resume。 | Compose 不从零写；优先评测 `zero-pi` 与 `rpiv-pi`。 |
+| Dream / Distill | `pi-hermes-memory`, `pi-context-manager`, `@gonrocca/zero-pi`, `pk-pi-hermes-evolve`, `@cad0p/pi-napkin` | 有 auto-consolidation、tool result distill、skill auto-learning、反思式改进，但未确认完整 MiMo 式闭环。 | 保留为自研主线。社区插件只能作为参考或底层。 |
+| Provider / OAuth | `pi-oauth`, `pi-supergrok`, `pi-vertex-ai-provider`, `tokenfactory-pi`, custom provider docs | 通用 OAuth / provider extension 模式存在。未确认 Xiaomi MiMo 专用 provider。 | 仍做 MiMo Provider。 |
+
+### 1.3 重点候选插件
+
+| 插件 | 角色 | 调研信号 | 需要验证 |
+|------|------|----------|----------|
+| `pi-hermes-memory` | 记忆主候选 | package 页描述含 SQLite FTS5、session search、secret scanning、auto-consolidation、background learning、procedural skills、368 tests。 | 是否能项目本地隔离；是否会保存敏感信息；Memory API 是否可被 Dream/Distill 复用。 |
+| `pi-memory` | 轻量 memory 候选 | Markdown memory、daily log、scratchpad、qmd semantic search，核心无 qmd 也可用。 | qmd 依赖成本；是否适合团队同步；注入预算是否可控。 |
+| `pi-memctx` | Markdown-native memory 候选 | local durable Markdown memory packs，before-prompt search/injection，after-turn learning。 | 与 Pi session tree、compaction 的交互；是否支持明确删除/更新。 |
+| `pi-context-manager` | context 管理候选 | tool result processing、distillation、context aging、context panel、payload recording。 | distill 是否只作用于 tool result；是否会与 memory 插件重复压缩。 |
+| `pi-subagents` | subagent 主候选 | 支持 chains、parallel execution、TUI clarification。 | 与最新版 Pi 兼容；后台任务、工具白名单、成本可观测性。 |
+| `pi-agents-team` | multi-agent team 候选 | 背景 RPC workers，主 session 做 coordinator，带 live dashboard、steer、stop、copy、cost。 | 复杂度和稳定性；是否适合默认栈。 |
+| `pi-until-done` | Goal/judge 候选 | `/until-done`，cross-model LLM judge，verifyCommand，防 premature done。 | 是否可换成 `/goal` 语义；是否能接入项目验证命令。 |
+| `@gonrocca/zero-pi` | Compose/SDD 候选 | `/forge`，explore/plan/build/veredicto，TDD evidence，per-phase model autotune，run memory，skill auto-learning。 | 语言/流程是否符合本项目；与 MiMo Provider、记忆插件是否可组合。 |
+| `@juicesharp/rpiv-pi` | Compose/SDD 候选 | discover/research/design/plan/implement/validate pipeline，12 个 specialist subagents。 | 依赖 `@tintinweb/pi-subagents` 版本；artifact 格式是否可复用。 |
+| `pk-pi-hermes-evolve` | Self-evolution 参考 | Hermes Agent Self-Evolution 风格，反思改进 skills/prompts/instruction files。 | 是否真实覆盖 Dream/Distill；是否可借鉴 staging/apply 闸门。 |
+
+### 1.4 关键差距
+
+社区插件能覆盖“能力点”，但还不能直接等于 MiMoCode：
+
+1. **统一产品语义缺失**：多个插件各自有命令、状态文件和 mental model，组合后不一定像一个产品。
+2. **插件间状态不互通**：memory、goal、workflow、subagent 可能各写各的目录，Dream/Distill 需要统一读取。
+3. **安全和质量不可默认信任**：社区包下载量不等于可纳入默认配置，必须审源码和 pin 版本。
+4. **Dream/Distill 闭环未确认成熟实现**：已有 auto-consolidation、context distill、skill auto-learning，但缺少完整的“会话轨迹 -> 候选知识/流程 -> staging -> 人工审核 -> 生效 -> 后续调用”闭环。
+
+---
+
+## 2. 新路线图
+
+### R0 — 插件调研与验收基线（预计 2~4 天）
+
+目标：用同一套验收场景筛选社区插件，决定哪些集成、哪些自研。
+
+任务：
+
+- [ ] 建立候选清单：memory、context、goal、subagent、workflow/self-evolution 各选 2-3 个。
+- [ ] 对每个候选做源码审查：
+  - package manifest 是否明确；
+  - 是否有 install scripts / lifecycle scripts；
+  - 是否有不必要的网络访问；
+  - 是否会上传会话、代码、memory；
+  - 是否能项目本地启用和禁用。
+- [ ] 用项目本地配置试用，不写全局默认：
+  - `pi -e npm:<package>` 做一次性验证；
+  - 或 `pi install -l npm:<package>@<version>` 写入 `.pi/settings.json`。
+- [ ] 记录插件状态文件位置、命令、工具名、可配置项、冲突点。
+- [ ] 用同一组 smoke scenarios 验证：
+  - 新会话能召回“项目使用 npm / 禁止 build”之类规则；
+  - compaction 后能回答“刚才做到哪一步”；
+  - goal 未满足时不会提前停止；
+  - subagent 能 read-only review；
+  - SDD workflow 能产生可审查 artifacts；
+  - 插件关闭后无残留副作用。
+
+验收标准：
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-0.1 | `mimo/` 目录与 `index.ts` 存在，`npm run build` 通过 | `npm run build` 退出码 0 |
-| AC-0.MiMo-A | 设 `MIMO_API_KEY` 后，MiMo provider 出现在模型列表，能成功调用 MiMo 模型 | `pi` 启动后 `/models` 可见 mimo，发一条消息收到 MiMo 回复 |
-| AC-0.MiMo-B | `/login` 选 MiMo，走 OAuth 拿到 token 并自动刷新；过期后无感续期 | `/login` → 选 MiMo → 完成；重启后 token 仍有效；模拟过期后自动 refresh |
-| AC-0.2 | `pi -e ./mimo/index.ts` 能启动，`session_start` 日志可见 | 启动后发送任意消息，控制台打印 MiMo 加载日志 |
-| AC-0.3 | `npm test` 跑通至少 1 个 mimo 用例 | 测试报告中 mimo 用例 pass |
-| AC-0.4 | 配置 schema 落地在 settings 文档与代码中 | 代码里有类型定义 + docs 有说明 |
+| AC-R0.1 | 每个候选插件有审查记录 | 文档列出版本、源码链接、权限、状态目录、风险。 |
+| AC-R0.2 | 至少一个 memory 候选通过 smoke test | 新会话能召回上一会话保存的项目规则。 |
+| AC-R0.3 | 至少一个 goal/judge 候选通过 smoke test | 故意提前结束时被 judge 拦住。 |
+| AC-R0.4 | 至少一个 subagent/workflow 候选通过 smoke test | 能委派 read-only review，并返回可用结果。 |
+| AC-R0.5 | 明确 build-vs-buy 决策 | 每个 MiMo 能力标注：集成、包装、自研、放弃。 |
 
-### 关键参考
-- `pi/packages/coding-agent/docs/development.md`
-- `pi/packages/coding-agent/docs/extensions.md` §Quick Start
-- `pi/packages/coding-agent/docs/providers.md`（subscription / API key / auth file 三种机制）
-- `pi/packages/coding-agent/docs/custom-provider.md`（`registerProvider` 完整参考 + `oauth` 登录流 + async factory 远程拉 models）
-- 示例：`examples/extensions/custom-provider-anthropic/`、`examples/extensions/custom-provider-gitlab-duo/`（OAuth 完整范例）
+交付物：
 
----
+- 更新本文件的候选矩阵和决策。
+- 如果需要单独沉淀，新增 `docs/research/pi-plugin-evaluation.md`。
 
-## P1 — 持久化记忆（预计 1~2 周）⭐ 核心差异化
+### R1 — MiMo Provider 接入（预计 2~4 天）
 
-### 目标
-复刻 MiMoCode 的「跨会话项目记忆」：基于 SQLite FTS5 全文检索，在 `session_start` 时按 token budget 将相关记忆注入上下文；agent 可主动保存记忆。
+目标：补齐社区生态缺口，把 Xiaomi MiMo 平台作为 Pi provider 接入。
 
-### 任务
+任务：
 
-- [ ] **1.1 存储抽象层 + 双实现**（`shared/memory-store.ts`）
-  - 先定义 `MemoryStore` 接口：`add() / search(query, budget) / update() / delete() / list() / vacuum()`
-  - **主实现 `SqliteFts5Store`**：
-    - 表结构：`memories(id, kind, title, body, tags, project, created_at, updated_at, hit_count)`
-    - FTS5 虚拟表：`memories_fts` 索引 `title + body + tags`
-    - 数据库路径：`.mimo/memory.db`（项目级），可配置为全局
-  - **备选实现 `LlmSelectorStore`**（无 SQLite 依赖的降级路径 `[源自 XIAOMI-MiMo-code: src/memdir/findRelevantMemories.ts]`）：
-    - 纯文件 + 一次轻量 LLM side-query；扫描记忆文件 header（`{filename, description}`），把「query + 清单 manifest」发给便宜小模型，让它选 top-K 相关条目
-    - 适用场景：容器/只读 fs、SQLite 不可用、记忆条目少（<50）时质量甚至优于关键词检索
-    - 用 Pi 的 `complete()` 实现独立 LLM 调用
-  - 通过配置 `memory.backend: "sqlite" | "llm-selector"` 切换；默认 sqlite，失败自动降级
-- [ ] **1.2 记忆注入钩子**（`memory/extension.ts`）
-  - 监听 `session_start`（reason 为 `startup` / `resume`）
-  - 从最近一条用户消息提取查询词，调 `memoryStore.search()` 取 top-K（`search` 内部按 backend 走 FTS5 或 LLM-selector）
-  - **预算化注入**：用 `estimateTokens()` 累加，超 budget（默认 4000 token）就截断；按 `kind`（规则 > 决策 > 笔记）和 `hit_count` 排序
-  - 用 `appendCustomMessageEntry("mimo-memory", ...)` 注入为系统上下文
-- [ ] **1.3 记忆工具**（供 LLM 调用）
-  - `memory_save`：保存一条记忆（kind/title/body/tags）
-  - `memory_search`：检索记忆
-  - `memory_update` / `memory_delete`
-  - 每个工具的 `details` 持久化操作日志，支持分支重建
-- [ ] **1.5 MEMORY.md 双向同步**
-  - 启动时若 `.mimo/MEMORY.md` 存在则导入到 SQLite
-  - 每次 `memory_save` / `memory_delete` 同步写回 `MEMORY.md`（人类可读）
-- [ ] **1.6 增量记忆提取**（`memory/extractor.ts`）`[源自 XIAOMI-MiMo-code: src/services/extractMemories/extractMemories.ts]`
-  - 挂到 `turn_end` 事件：每轮对话结束后，用独立 LLM（便宜小模型）判断「这轮有什么新知识值得持久化」
-  - 通过 `memory_save` 工具写入；与 P2 的 compaction 检查点互补——**1.6 是细粒度增量、低成本；P2 是低频全局快照**
-  - 关键优化（借鉴上游）：fork 当前会话消息历史做提取，可共享父会话 prompt cache，几乎零额外 token 成本
-- [ ] **1.7 测试**：单元测试覆盖 add/search/budget 截断（两个 backend 都要覆盖）；e2e 测试「保存记忆 → 新会话 → 记忆被注入」。
+- [ ] 阅读并确认当前 `docs/custom-provider.md`、`docs/providers.md` 和示例 provider。
+- [ ] 实现项目本地 MiMo provider extension：
+  - API Key 路径优先；
+  - provider id 使用 `mimo`；
+  - 模型列表尽量动态拉取，无法拉取时使用明确的最小 fallback；
+  - 不硬编码用户凭证。
+- [ ] OAuth 只在官方端点和授权流程确认后实现；未确认前不阻塞 R2。
+- [ ] 写最小 provider 测试或 smoke script。
 
-### 验收标准
+验收标准：
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-1.1 | `MemoryStore` 接口有两个实现且都能 recall：sqlite 模式下 `.mimo/memory.db` 含 `memories_fts` 表 | `sqlite3 .mimo/memory.db ".tables"`；切到 `llm-selector` 模式重跑，记忆仍生效 |
-| AC-1.2 | 跨会话记忆生效：A 会话保存「项目用 Bun」，新开 B 会话问依赖管理，agent 知道用 Bun | 手动 e2e：save → `/new` → 提问 → 答案含 Bun |
-| AC-1.3 | Token budget 生效：注入总 token 不超过配置上限（+10% 容差） | 注入后打印实际 token，断言 ≤ budget×1.1 |
-| AC-1.4 | `MEMORY.md` 与 store 内容一致 | save 后读 MEMORY.md，包含刚存的条目 |
-| AC-1.5 | 分支安全：`/fork` 后两分支记忆状态独立 | fork → 一边 save → 切回另一边 → 不含该条目 |
-| AC-1.6 | 每轮结束自动提取增量记忆（1.6） | 跑一轮有知识含量的对话 → turn_end 后 memory.db 多了对应条目 |
+| AC-R1.1 | `MIMO_API_KEY` 路径可用 | Pi 模型列表出现 `mimo` provider。 |
+| AC-R1.2 | 可完成一次真实模型调用 | 用 MiMo 模型发一条低成本 prompt，得到回复。 |
+| AC-R1.3 | provider 不影响其他 providers | 不设置 `MIMO_API_KEY` 时 Pi 正常启动，其他模型可用。 |
+| AC-R1.4 | OAuth 状态明确 | 实现或记录“因官方端点不明确而暂缓”。 |
 
-### 关键参考（Pi 现有资产）
-- **直接借鉴**：`pi-memctx`（官方记忆包，Markdown packs 方式）——我们的 FTS5 是其增强版
-- **备选借鉴** `[源自 XIAOMI-MiMo-code]`：`src/memdir/findRelevantMemories.ts`（LLM-as-selector，无 SQLite 降级方案）；`src/services/extractMemories/extractMemories.ts`（fork-agent 增量提取）
-- API：`session_start` 事件、`appendCustomMessageEntry`、`estimateTokens()`（from `core/compaction`）、`complete()`（from `pi-ai`）
-- token 计数：`examples/extensions/custom-compaction.ts` 里 `tokensBefore` 的计算方式
+### R2 — 社区插件组合成可用原型（预计 3~5 天）
 
----
+目标：用通过 R0 的插件组成“80% MiMoCode-like”体验，不自研通用能力。
 
-## P2 — 检查点 + 上下文重建（预计 1~2 周）
+任务：
 
-### 目标
-复刻 MiMoCode 的「自动检查点 + 上下文重建」：在 compaction 前由子 LLM 生成结构化 checkpoint 快照；上下文接近上限时，从 checkpoint + 项目记忆 + 任务进展重建上下文，让 agent 无缝继续任务。
+- [ ] 固定项目本地插件栈：
+  - memory：从 `pi-hermes-memory` / `pi-memory` / `pi-memctx` 中选一个；
+  - context：从 `pi-context-manager` / `pi-vcc` / `pi-continue` 中选一个；
+  - goal：从 `pi-until-done` / `pi-goal-*` / `pi-ralph` 中选一个；
+  - subagent/workflow：从 `pi-subagents` / `pi-agents-team` / `zero-pi` / `rpiv-pi` 中选一到两个。
+- [ ] 统一项目配置：
+  - 使用 `.pi/settings.json` 记录项目本地 package；
+  - 固定 npm version 或 git ref；
+  - 禁用不需要的 resources；
+  - 记录手动启用/禁用方法。
+- [ ] 建立 smoke checklist：
+  - memory recall；
+  - context continuation；
+  - goal judge；
+  - subagent review；
+  - workflow artifacts；
+  - package disable/rollback。
 
-### 任务
-
-- [ ] **2.1 自定义 Compaction handler**（`checkpoint/extension.ts`）
-  - 监听 `session_before_compact`，**接管压缩逻辑**
-  - 借鉴 `examples/extensions/custom-compaction.ts`，但生成 MiMoCode 风格的结构化 checkpoint：
-    - `## 当前目标` / `## 已完成` / `## 进行中` / `## 待决策` / `## 相关文件`
-  - checkpoint 写入 `appendCustomEntry("mimo-checkpoint", {...})`（不进上下文）+ 同时落盘 `.mimo/checkpoint.md`
-  - summary 部分仍用 `compaction.summary` 注入上下文
-- [ ] **2.2 自动触发策略**
-  - 复用 Pi 的 `shouldCompact()` 阈值（默认 80% 上下文窗口）
-  - 额外：每 N 轮（默认 15）强制写一次 checkpoint（即使没触发 compaction）
-- [ ] **2.3 上下文重建**
-  - `session_start`（resume）时，若存在最新 checkpoint：
-    - 把 checkpoint.md 内容作为 high-priority 上下文注入
-    - 叠加 P1 的项目记忆 + P2.4 的任务进展
-    - 全部走 budget 化排序（checkpoint 优先级最高）
-- [ ] **2.4 任务进展注入**（依赖 P3 tasks，但此阶段先 stub）
-  - 预留接口：`getTaskProgress()` 返回当前任务树状态摘要
-  - P2 阶段返回空，P3 完成后接入
-
-### 验收标准
+验收标准：
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-2.1 | Compaction 触发时生成结构化 checkpoint.md，五段式结构完整 | 触发 `/compact` 或自动压缩，检查 `.mimo/checkpoint.md` |
-| AC-2.2 | checkpoint 同时存在 session JSONL（custom entry）与磁盘文件 | `grep "mimo-checkpoint" session.jsonl` 有记录 |
-| AC-2.3 | `/resume` 后 agent 能复述上次中断时的目标与进度 | 压缩 → 关闭 → resume → 问"我们刚做到哪了"，答案对得上 |
-| AC-2.4 | 重建上下文总 token 在预算内（checkpoint + memory + tasks） | 打印注入明细，断言不超 budget |
-| AC-2.5 | 压缩前后 token 下降比例可观测（对标 Pi ~46%） | 记录压缩前后 token，打印降幅 |
+| AC-R2.1 | 新用户可按 README 启动插件栈 | 从干净 Pi 配置启动，能看到已加载 package。 |
+| AC-R2.2 | 插件组合无明显命令冲突 | `/` 命令列表可读，重复命令有明确取舍。 |
+| AC-R2.3 | 完成一个小型代码任务闭环 | plan/goal/subagent/memory 至少各使用一次。 |
+| AC-R2.4 | 可安全回滚 | 删除 `.pi/settings.json` 中 package 后 Pi 正常恢复。 |
 
-### 关键参考（Pi 现有资产）
-- **直接借鉴**：`examples/extensions/custom-compaction.ts`（完整可运行，我们改 prompt + 加 checkpoint 落盘）
-- API：`session_before_compact` 事件返回 `{ compaction: { summary, firstKeptEntryId, tokensBefore } }`
-- token 估算：`estimateTokens()`、`shouldCompact()` from `core/compaction`
+### R3 — MiMo Compatibility Layer（预计 3~5 天）
 
----
+目标：在不重写底层插件的前提下，把多个社区插件包装成一个 MiMo 风格入口。
 
-## P3 — 任务追踪 + Goal 停止条件（预计 1~2 周）
+任务：
 
-### 目标
-- 复刻 MiMoCode 的「树状任务系统（T1, T1.1, T1.2）」，自动与检查点联动，恢复会话时进度不丢失。
-- 复刻「`/goal` + 独立裁判模型」，防止自主工作中的"乐观停止"。
+- [ ] 新建 `packages/coding-agent/src/extensions/mimo/` 聚合入口。
+- [ ] 实现轻量命令别名和状态检查：
+  - `/mimo-status`：列出 MiMo provider、memory、goal、workflow 插件状态；
+  - `/mimo-doctor`：检查必要包、版本、配置和状态目录；
+  - `/mimo-memory`：桥接已选 memory 插件的常用操作；
+  - `/mimo-goal`：桥接已选 goal 插件或提示安装。
+- [ ] 不直接 fork 社区插件代码，除非 R0 证明必须修补。
+- [ ] 所有包装层都要在插件缺失时 graceful degradation。
 
-### 任务（任务追踪）
-
-- [ ] **3.1 任务数据模型**：树状结构，每个任务 `{ id, title, status, parent_id, created_at, ... }`
-  - ID 规则：`T1`, `T1.1`, `T1.2`, `T2`...（深度无限制）
-- [ ] **3.2 任务工具**（`tasks/extension.ts`，借鉴 `examples/extensions/todo.ts`）
-  - `task_create` / `task_update` / `task_list` / `task_complete`
-  - **状态持久化用 `details`**（分支安全），借鉴 todo.ts 的 `reconstructState`
-  - 额外：`appendCustomEntry("mimo-task-progress", {taskId, log})` 记录逐任务日志
-- [ ] **3.3 任务进展文件**：`.mimo/tasks/<id>/progress.md`，每次状态变更追加一行日志
-- [ ] **3.4 与检查点联动**：P2 的 `getTaskProgress()` 接入，checkpoint 注入当前任务树快照
-- [ ] **3.5 `/tasks` 命令**：TUI 渲染树状任务面板（借鉴 todo.ts 的 `TodoListComponent`）
-
-### 任务（Goal 停止条件）
-
-- [ ] **3.6 `/goal` 命令**：设置会话停止条件，存到 `appendCustomEntry("mimo-goal", {condition})`
-- [ ] **3.7 裁判评估**：监听 `turn_end`，当 agent 表达停止意图时：
-  - 用**独立裁判模型**（可配置，默认小模型）评估当前对话 vs goal 条件
-  - 裁判 prompt：「以下对话中，agent 声称完成了任务。请判断 `[goal]` 是否真正满足，输出 JSON `{satisfied: bool, reason}`」
-  - 不满足 → 注入 `ctx.ui.notify` + 追加一条 user 消息督促继续
-  - 满足 → 正常结束
-
-### 验收标准
+验收标准：
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-3.1 | 创建树状任务后，`/tasks` 正确渲染层级（T1 / T1.1 缩进） | 创建多级任务，看 TUI 渲染 |
-| AC-3.2 | 任务状态在 `/fork` 后两分支独立 | todo.ts 同款验证：fork → 一边 complete → 切回 → 状态未变 |
-| AC-3.3 | `.mimo/tasks/<id>/progress.md` 记录状态变更历史 | 多次 update 后读文件，含时间线 |
-| AC-3.4 | checkpoint 上下文重建包含任务树快照 | 压缩 → resume，注入内容含任务进度 |
-| AC-3.5 | `/goal "所有测试通过"` 后，agent 擅自停止时被裁判驳回 | 故意让 agent 提前停，观察裁判注入继续消息 |
-| AC-3.6 | 裁判用的是独立模型（可配置，非主模型） | 日志打印裁判模型 id |
-| AC-3.7 | goal 真正满足时正常放行 | agent 确实跑通测试，裁判 satisfied=true |
+| AC-R3.1 | `/mimo-status` 能识别当前插件栈 | 输出 provider、memory、goal、workflow 状态。 |
+| AC-R3.2 | 插件缺失不崩溃 | 卸载一个候选插件后，doctor 给出明确修复建议。 |
+| AC-R3.3 | 包装层不复制第三方插件核心逻辑 | 代码只做检测、路由、配置和命令适配。 |
 
-### 关键参考（Pi 现有资产）
-- **直接借鉴**：`examples/extensions/todo.ts`（状态重建 + 分支安全 + TUI 组件，几乎 1:1 可复用）
-- **直接借鉴**：`examples/extensions/subagent/`（spawn 独立进程做裁判，或用 `complete()` 单次调用更轻量）
-- API：`turn_end` 事件、`complete()` from `pi-ai`、`appendCustomEntry`
+### R4 — Dream/Distill 自我进化闭环（预计 1.5~2.5 周）
 
----
+目标：实现 MiMoCode 最核心的差异化，不只压缩上下文，而是让 agent 从历史工作中沉淀可复用能力。
 
-## P4 — 子智能体编排 + Compose（预计 2~3 周）
+架构原则：
 
-### 目标
-- 复刻 MiMoCode「主智能体按需生成子智能体，共享上下文并行工作」。
-- 复刻「Compose 编排模式」：specs-driven，内置规划→执行→审查→TDD→调试→验证→合并的完整开发生命周期。
+- 读取 Pi session JSONL 和已选插件的状态文件。
+- 优先复用已选 memory 插件作为长期记忆后端。
+- 所有自动生成的 skill / prompt / subagent / command 先进入 staging，不直接生效。
+- 删除、覆盖、安装新能力必须经过用户确认。
 
-### 任务（子智能体）
+任务（Dream）：
 
-- [ ] **4.1 子智能体运行时**（`subagent/extension.ts`，借鉴 `examples/extensions/subagent/`）
-  - **架构选择**：Pi 的 subagent 示例用「spawn 独立 `pi` 子进程 + JSON 输出」。我们采用此模式（隔离性强），但加编排层：
-    - 单任务 / 并行多任务 / 链式（chain，前一个输出喂后一个）三种模式
-    - 每个子 agent 配置：`{ name, task, tools[], model, systemPrompt }`
-  - **生命周期追踪**：主 agent 通过 `tool_update` 回调实时看到子 agent 进度
-  - **后台执行**：长任务可后台跑，主 agent 不阻塞
-  - **备选架构 Coordinator 模式** `[源自 XIAOMI-MiMo-code: src/coordinator/, docs/agent/coordinator-and-swarm.mdx]`：一个主控协调器只给 `Agent`/`SendMessage`/`TaskStop` 三个工具，多个全工具 worker 并行；用 `<task-notification>` XML 做 agent 间通信。适合「一个主控调度多个长期 worker」场景；与 spawn 模式按场景二选一
-- [ ] **4.1.1 Worktree 隔离** `[源自 XIAOMI-MiMo-code: docs/agent/worktree-isolation.mdx]`
-  - 并行模式下，每个改代码的子 agent 跑在独立 git worktree，避免文件编辑冲突
-  - 完成后用 `git merge`（或 cherry-pick）合并回主 worktree；这是并行子智能体能真正改代码的关键配套
-- [ ] **4.2 内置 agent 目录**（借鉴 subagent 示例的 `agents/` frontmatter 发现）
-  - `checkpoint-writer`：P2 检查点的子 agent（生成结构化快照）
-  - `code-reviewer`：Compose 的代码审查 agent
-  - `test-writer`：TDD 的测试编写 agent
-  - 放 `.mimo/agents/*.md`，frontmatter 定义 tools/model
+- [ ] 会话扫描器：
+  - 列出近 N 天 Pi sessions；
+  - 解析有效 branch；
+  - 提取用户目标、关键决策、失败修复、项目规则、验证命令。
+- [ ] 知识提取：
+  - 用独立可配置模型；
+  - 输出结构化候选：`kind/title/body/tags/sourceSession/sourceEntryIds/confidence`；
+  - 与现有 memory 去重合并。
+- [ ] Staging：
+  - 写入 `.mimo/dream-staging/YYYY-MM-DD.jsonl`；
+  - 用户确认后写入 memory 后端；
+  - 拒绝项记录原因，避免重复推荐。
+- [ ] 自动 Dream：
+  - 时间门：距上次 dream >= 配置小时数；
+  - 会话门：新增 session 数 >= 配置阈值；
+  - 锁门：PID lock 防并发；
+  - 默认只生成 staging，不自动 apply。
 
-### 任务（Compose 模式）
+任务（Distill）：
 
-- [ ] **4.3 Compose mode 注册**：研究 Pi 的 `modes/` 机制，注册 `compose` 为一个 mode
-- [ ] **4.4 specs-driven 流程**：`/compose <spec>` 触发编排：
-  1. **规划**：子 agent 读 spec，拆成任务树（复用 P3 任务系统）
-  2. **执行**：按任务树顺序，每个任务 spawn 子 agent 实现
-  3. **审查**：`code-reviewer` agent 审查每个变更
-  4. **TDD**：`test-writer` 先写测试，执行 agent 让测试过
-  5. **调试**：失败时循环修复（带最大重试次数）
-  6. **验证**：全量测试 + 类型检查
-  7. **合并**：git 操作（借鉴 `git-merge-and-resolve.ts`）
-- [ ] **4.5 Compose UI**：展示当前编排阶段、各子 agent 状态、任务树进度
+- [ ] workflow miner：
+  - 分析多会话工具调用序列；
+  - 找出重复的 read/edit/test/review/release/debug 模式；
+  - 结合 LLM 判断是否值得打包。
+- [ ] packager：
+  - 生成 Pi skill：`.mimo/distill-staging/skills/<name>/SKILL.md`；
+  - 可选生成 prompt template；
+  - 可选生成 subagent role definition；
+  - 生成可审查 manifest，列出触发条件、权限、风险和来源 evidence。
+- [ ] apply command：
+  - `/distill-apply <id>` 复制到 `.pi/skills` / `.pi/prompts` / `.pi/agents`；
+  - 不覆盖已有同名文件，除非用户确认；
+  - 应用后运行 `/reload` 提示。
 
-### 验收标准
-
-| 编号 | 验收项 | 验证方式 |
-|------|--------|----------|
-| AC-4.1 | `subagent` 工具可并行 spawn 多个 agent，结果聚合返回 | 调用并行模式跑 2 个独立任务，结果都返回 |
-| AC-4.2 | 链式模式：前一个 agent 输出被 `{previous}` 占位替换 | chain 模式跑 A→B，B 的输入含 A 输出 |
-| AC-4.3 | 主 agent 在子 agent 执行时收到 `tool_update` 实时进度 | 子 agent 输出时，主 agent TUI 显示增量 |
-| AC-4.4 | 后台子 agent 不阻塞主 agent | 启动后台子任务，主 agent 可继续对话 |
-| AC-4.5 | 并行改代码的子 agent 在独立 worktree 不冲突（4.1.1） | 并行跑两个都改同一文件的子 agent，都能完成且可合并 |
-| AC-4.6 | `/compose` 能跑通一个最小 spec（单文件改动） | 给一个"添加 hello() 函数"的 spec，全流程跑通且测试过 |
-| AC-4.7 | Compose 各阶段有明确 UI 反馈 | TUI 显示当前阶段（规划/执行/审查...） |
-| AC-4.8 | checkpoint-writer 子 agent 与 P2 集成 | Compose 流程中途断开，resume 后能续上 |
-
-### 关键参考（Pi 现有资产）
-- **直接借鉴**：`examples/extensions/subagent/`（完整子进程编排，含 single/parallel/chain 三模式）
-- **直接借鉴**：`examples/extensions/git-merge-and-resolve.ts`（Compose 合并阶段）
-- **直接借鉴**：`examples/extensions/plan-mode/`（mode 注册范例）
-- **备选借鉴** `[源自 XIAOMI-MiMo-code]`：`src/coordinator/`（Coordinator/Swarm 编排范式）；`docs/agent/worktree-isolation.mdx`（并行子 agent 的 worktree 隔离）
-- API：`spawn` from `node:child_process`、`registerFlag`、`ctx.ui.custom`（自定义 UI 组件）
-
----
-
-## P5 — Dream & Distill 自我进化（预计 1.5~2.5 周）⭐ 最大差异化
-
-### 目标
-复刻 MiMoCode 最独特的两个命令：
-- `/dream`：扫描近期会话轨迹，提取持久知识到项目记忆，清理过时条目。
-- `/distill`：发现近期工作中重复的手动工作流，将高置信度候选打包成可复用的 skill/subagent/command。
-
-这是 MiMoCode 相对 Pi 最大的差异化，Pi 生态里没有对应物，**完全靠我们从零实现**。但因为 Pi 的 session JSONL 是结构化可扫描数据，实现路径清晰。
-
-### 任务（Dream）
-
-- [ ] **5.1 会话扫描器**（`dream/scanner.ts`）
-  - 调 `SessionManager` 列出近 N 天的 session 文件（借鉴 `static listing methods`）
-  - 解析每个 JSONL：用 `getBranch()` 提取有效分支消息
-  - 复用 P2 的 `serializeConversation` / `convertToLlm`
-- [ ] **5.2 知识提取**（`dream/extractor.ts`）
-  - 用独立 LLM（默认小模型省 token）处理会话轨迹，prompt：
-    - 「从以下开发会话中提取：①值得持久化的项目知识 ②架构决策及理由 ③踩过的坑 ④可复用的模式」
-    - 输出结构化 JSON：`[{title, body, kind, tags}]`
-  - **去重 + 合并**：与现有 memory 比对（FTS5 相似度），相似则合并，全新的插入
-- [ ] **5.3 过时清理**
-  - LLM 判断现有记忆中哪些已过时（如「用了 React 16」但代码已是 18）
-  - 输出候选删除清单，**需用户确认**（`ctx.ui.confirm`）后删除
-- [ ] **5.4 `/dream` 命令**：聚合上述，带进度 UI，输出「新增 N 条 / 合并 M 条 / 清理 K 条」
-- [ ] **5.4.1 自动 Dream（三重门控）** `[源自 XIAOMI-MiMo-code: src/services/autoDream/autoDream.ts]`
-  - 不仅有手动 `/dream`，还要支持**自动触发**：`session_start` 时检查门控，通过则后台 fork agent 跑 consolidation
-  - 门控顺序（从最便宜到最贵，逐一短路）：
-    1. **时间门**：距上次 consolidate ≥ `dream.auto.minHours`（默认 24h，一次 stat）
-    2. **会话门**：自上次 consolidate 后新增 transcript 数 ≥ `dream.auto.minSessions`（默认 5）
-    3. **锁门**：没有其他进程正在 consolidate（PID 锁，多窗口/多实例安全）
-  - consolidation 复用 5.2 提取 + 5.3 清理的逻辑，只是无人值守触发
-
-### 任务（Distill）
-
-- [ ] **5.5 工作流挖掘**（`distill/miner.ts`）
-  - 跨会话分析**重复的工具调用序列**（如多次出现 `read → edit → bash test`）
-  - 启发式 + LLM 结合：先用算法找高频子序列，再让 LLM 判断是否构成"有意义的 workflow"
-- [ ] **5.6 Skill 打包**（`distill/packager.ts`）
-  - 高置信度候选 → 生成 Pi skill（参考 `docs/skills.md` 的格式）
-  - 生成 subagent 定义（参考 subagent 示例的 frontmatter 格式）
-  - 生成 slash command（参考 `registerCommand`）
-  - **人工审核闸门**：所有打包结果默认进 `.mimo/distill-staging/`，用户 `/distill-apply` 才生效
-- [ ] **5.7 `/distill` 命令**：展示挖掘到的候选工作流，用户选择性打包
-
-### 验收标准
+验收标准：
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-5.1 | `/dream` 能扫描近 7 天会话，输出提取到的知识条目 | 在有历史会话的项目跑 `/dream`，有合理输出 |
-| AC-5.2 | 提取的知识写入 memory.db 且 MEMORY.md 同步 | dream 后查 SQLite + MEMORY.md，条目新增 |
-| AC-5.3 | 相似知识被合并而非重复插入 | 先手动 save 一条类似记忆，dream 后该条被更新而非新增 |
-| AC-5.4 | 过时清理需用户确认，不会静默删除 | dream 触发清理时弹 confirm，取消则不删 |
-| AC-5.5 | 自动 Dream 在三重门控通过时自动触发（5.4.1） | 模拟「距上次≥24h + 新增≥5 会话」启动，自动跑 consolidation；时间或会话不足时不触发 |
-| AC-5.6 | `/distill` 能识别重复工具调用序列 | 构造多次相同工作流的测试会话，distill 能发现 |
-| AC-5.7 | 打包出的 skill 落在 staging，`/distill-apply` 后才进 `.pi/skills/` | 打包后检查 staging，apply 后检查 skills 目录 |
-| AC-5.8 | 生成的 skill 可被 Pi 正常加载调用 | apply 后新会话能触发该 skill |
-| AC-5.9 | 所有 LLM 调用用独立可配置模型（避免烧主模型 token） | 配置 `dream.model` / `distill.model`，日志验证 |
+| AC-R4.1 | `/dream` 能扫描历史会话并生成候选知识 | staging JSONL 含 source session 和 confidence。 |
+| AC-R4.2 | `/dream-apply` 写入已选 memory 后端 | 新会话能召回刚应用的知识。 |
+| AC-R4.3 | 自动 Dream 不静默修改长期记忆 | 只写 staging，除非用户确认。 |
+| AC-R4.4 | `/distill` 能发现重复 workflow | 构造重复会话后生成候选 workflow。 |
+| AC-R4.5 | `/distill-apply` 生成的 skill 可被 Pi 加载 | `/reload` 后 skill 可见并可触发。 |
+| AC-R4.6 | 删除/覆盖有明确闸门 | 取消确认后文件不变。 |
 
-### 关键参考（Pi 现有资产）
-- **无直接对应**（这是 MiMoCode 独有）——但可复用：
-  - `SessionManager` 的静态列举方法（扫描历史会话）
-  - `examples/extensions/handoff.ts` 的 `getHandoffMessages` / `serializeConversation`（会话解析）
-  - `complete()` from `pi-ai`（独立 LLM 调用）
-  - `docs/skills.md`（skill 格式规范）
-  - `examples/extensions/subagent/agents.ts`（agent frontmatter 格式）
-- **备选借鉴** `[源自 XIAOMI-MiMo-code]`：`src/services/autoDream/autoDream.ts`（三重门控自动 consolidation）；`src/services/autoDream/consolidationPrompt.ts`（4 阶段反思 prompt）；`src/skills/bundled/skillify`（自我生成 skill 的元技能，可与 distill 合并）
+### R5 — 发布与文档（预计 3~5 天）
 
----
+目标：把 `mimo-pi` 变成可安装、可解释、可回滚的 Pi enhancement layer。
 
-## P6 — 收尾打磨（预计 1~2 周）
+任务：
 
-### 目标
-完成 MiMoCode 宣传但尚未实现的功能，达到可对外发布的完整度。
+- [ ] README 改为“插件优先”的真实状态描述。
+- [ ] 写清楚默认推荐插件栈、可替代插件和版本 pin 策略。
+- [ ] 写 `mimo-doctor` 的故障排查表。
+- [ ] 写 Dream/Distill 数据安全说明。
+- [ ] 跑 smoke checklist。
 
-### 任务
-
-- [ ] **6.1 多智能体 mode 切换**：build / plan / compose 三个 mode 的 `Tab` 切换（借鉴 `plan-mode/` 示例 + P4 的 compose mode）
-- [ ] **6.2 语音输入**（`voice/extension.ts`）：封装 TenVAD + MiMo ASR，`/voice` 激活，流式转写追加到编辑器
-- [ ] **6.3 Max Mode**（实验）：配置 `experimental.maxMode`，并行 best-of-N 推理 + 裁判选优（复用 P3 的裁判模型机制）
-- [ ] **6.4 统一配置**：`.mimo/mimocode.json` 汇总所有 MiMo 扩展的配置（memory.budget / checkpoint.interval / goal.judgeModel / dream.model ...）
-- [ ] **6.5 聚合入口完善**：`mimo/index.ts` 按 config 开关加载各扩展，未启用的扩展不加载
-- [ ] **6.6 文档**：README 更新、各扩展的 docs、迁移指南（从 MiMoCode 迁配置）
-
-### 验收标准
+验收标准：
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-6.1 | `Tab` 在 build/plan/compose 间切换，权限正确（plan 只读） | 切到 plan 后 edit 工具被禁用 |
-| AC-6.2 | `/voice` 启动后说话能转写进编辑器（需 MiMo 登录） | 手动语音测试 |
-| AC-6.3 | Max Mode 开启后并行 N 路，裁判选最优输出 | 配置开启，观察日志有 N 路推理 |
-| AC-6.4 | 单一配置文件控制所有行为 | 改 budget → 重启 → 注入量变化 |
-| AC-6.5 | 未启用的扩展完全不加载（无副作用） | 关闭 memory → 重启 → memory.db 不被读写 |
-| AC-6.6 | 文档完整，新用户能按 README 跑通 | 找人按文档走一遍 |
+| AC-R5.1 | 新用户能按文档得到可用原型 | 从干净配置安装并跑通 smoke。 |
+| AC-R5.2 | 用户能理解哪些是第三方能力 | README 明确列出 package 来源和风险。 |
+| AC-R5.3 | 用户能禁用所有第三方插件 | 文档包含 rollback 步骤。 |
 
 ---
 
-## 总览：阶段依赖与里程碑
+## 3. 旧从零实现计划的保留方式
 
-```
-P0 工程基线 + MiMo Provider (2-3天)
-  │   └─(前置: MiMo API Key + OAuth,后续功能用它验证)
-  ▼
-P1 持久化记忆 (1-2周) ──────────────┐ ⭐核心
-  │                                  │
-  ▼                                  │
-P2 检查点+上下文重建 (1-2周)         │
-  │   └─(stub getTaskProgress)       │
-  ▼                                  │
-P3 任务追踪+Goal (1-2周) ────────────┤
-  │   └─(接入 P2 getTaskProgress)    │
-  ▼                                  │
-P4 子智能体+Compose (2-3周) ─────────┤
-  │   └─(checkpoint-writer 接 P2)    │
-  ▼                                  │
-P5 Dream & Distill (1.5-2.5周) ──────┘ ⭐最大差异化
-  │   └─(依赖 P1 memory + P3 tasks)
-  ▼
-P6 收尾打磨 (1-2周)
-```
+旧 P0-P6 不删除其价值，但不再作为默认路线。
 
-### 里程碑
-
-| 里程碑 | 完成阶段 | 交付物 | 累计预计 |
-|--------|---------|--------|----------|
-| **M1 可用原型** | P0 + P1 | MiMo Provider + 「带跨会话记忆的 Pi」 | ~2.5 周 |
-| **M2 记忆闭环** | + P2 + P3 | 记忆 + 检查点 + 任务 + Goal | ~6 周 |
-| **M3 编排能力** | + P4 | 子智能体 + Compose | ~8.5 周 |
-| **M4 自我进化** | + P5 | Dream + Distill（完整差异化） | ~11 周 |
-| **M5 可发布** | + P6 | 全功能，文档齐全 | ~13 周 |
+| 旧阶段 | 新定位 | 触发自研条件 |
+|--------|--------|--------------|
+| P0 工程基线 + Provider | 保留，其中 Provider 仍执行 | MiMo provider 无社区可用实现。 |
+| P1 持久化记忆 | 降级为 fallback | 候选 memory 插件不能项目隔离、不能预算注入、不能通过安全审查。 |
+| P2 检查点 + 上下文重建 | 降级为 fallback | context/compaction 插件不能在 compaction/resume 后稳定恢复任务状态。 |
+| P3 任务追踪 + Goal | 降级为 fallback | goal/task 插件不能分支安全、不能独立 judge、不能配置验证命令。 |
+| P4 子智能体 + Compose | 降级为 fallback | subagent/workflow 插件冲突严重、不可控或无法项目本地固定。 |
+| P5 Dream & Distill | 提升为主线 | 社区插件只有局部能力，没有完整 self-evolution 闭环。 |
+| P6 收尾打磨 | 保留 | 基于最终插件栈和自研能力重写文档。 |
 
 ---
 
-## 风险登记册
+## 4. 当前推荐执行顺序
+
+1. **先做 R0，不写功能代码。**
+   目标是用 evidence 决定插件栈，避免重复造轮子。
+
+2. **并行推进 R1 的 MiMo API Key provider。**
+   这是明确缺口，且后续所有 smoke 都能用真实 MiMo 模型验证。
+
+3. **R2 只做项目本地组合，不做全局默认安装。**
+   所有包必须 pin version 或 git ref。
+
+4. **R3 做薄包装，不 fork 社区插件。**
+   包装层只提供 MiMo 风格入口、doctor、状态检查和少量命令别名。
+
+5. **R4 集中投入 Dream/Distill。**
+   这是 `mimo-pi` 相对普通 Pi 插件栈的主要差异化。
+
+---
+
+## 5. 风险登记册
 
 | 风险 | 概率 | 影响 | 应对 |
 |------|------|------|------|
-| Pi 的 Extension API 在 0.x 版本可能 breaking change | 高 | 中 | 把依赖收敛到 `ExtensionAPI` / `SessionManager` / `complete()` 几个稳定接口；锁定 pi 版本；每次升级跑全量测试 |
-| 子智能体用 spawn 子进程模式开销大 | 中 | 中 | P4 优先验证；备选：用 SDK 的 `createAgentSession` in-process（牺牲隔离性换性能） |
-| Compose 与 Pi 的 mode 系统耦合深，可能需改内核 | 中 | 高 | P4 早期 spike；若必须改内核，评估是否接受 fork 维护成本 |
-| Dream/Distill 的 LLM 调用成本高 | 中 | 中 | 默认用便宜小模型；加 dry-run 模式只扫描不调 LLM；用户确认后才提取 |
-| SQLite 在某些环境（容器/只读 fs）不可用 | 低 | 中 | 已有明确降级路径：`MemoryStore` 抽象接口下提供 `LlmSelectorStore` 备选实现（无 SQLite 依赖，纯文件 + 一次 LLM side-query）`[源自 XIAOMI-MiMo-code]`；失败时自动降级 |
-| Pi 的 token 计数（`estimateTokens`）不够准 | 中 | 低 | 预算化注入留 10% 容差；关键场景用真实 tokenizer 校准 |
-| 小米 MiMo OAuth 端点细节未公开 / 可变动 | 中 | 中 | 方式 A（API Key）先落地保证可用；OAuth 作为增强体验，跟进官方文档；token 刷新失败时回退提示重新登录 |
+| 第三方插件有全系统权限 | 高 | 高 | 源码审查、版本 pin、项目本地安装、最小化 resources、记录状态目录。 |
+| 插件之间命令/状态冲突 | 中 | 中 | R0 smoke test 覆盖组合场景；R3 doctor 检测冲突。 |
+| 社区插件更新导致破坏 | 高 | 中 | 固定版本；升级必须重新跑 R0 smoke。 |
+| 社区插件下载量虚高或质量不稳 | 中 | 中 | 不以下载量作为唯一依据；检查测试、源码、issue、release 频率。 |
+| Dream/Distill 误提取错误知识 | 中 | 高 | staging-first、source evidence、confidence、人工 apply、可回滚。 |
+| 自动 Dream 打扰主任务 | 中 | 中 | 三重门控、后台锁、默认只 staging、不自动写长期记忆。 |
+| MiMo OAuth 官方细节不清 | 中 | 中 | API Key 先落地；OAuth 明确端点后再做。 |
 
 ---
 
-## 开发原则
+## 6. 开发与验证规则
 
-1. **每阶段都要有可演示的闭环**，不要积累太多未验证代码。
-2. **优先借鉴 Pi 自带示例**，它们是官方维护的、跟版本同步的，比自己造轮子更稳。
-3. **SQLite FTS5 和裁判模型是 MiMoCode 的护城河**，这两块要重点打磨；但 FTS5 已有 LLM-selector 降级路径，不必强依赖。
-4. **不改 Pi 内核**。所有功能通过 Extension 实现，保持与上游 merge 的能力。
-5. **验收标准必须可自动验证的就自动化**（vitest），只能手动验证的写清操作步骤。
+- 文档改动不需要跑 `npm run check`。
+- 代码改动后跑 `npm run check`，不要跑 `npm run build`，除非用户明确要求。
+- 新增或修改测试文件时，运行对应测试并迭代到通过。
+- 第三方 package 试用优先：
+  - 一次性：`pi -e npm:<package>@<version>`
+  - 项目本地：`pi install -l npm:<package>@<version>`
+- 不用 `git add -A`；提交前只 stage 本次会话修改的明确文件。
 
 ---
 
-*文档版本：v1.2 · 基于本地 `mimo-pi/` fork（`@earendil-works/pi-coding-agent@0.79.3`）*
+## 7. 参考来源
+
+- Pi package catalog: `https://pi.dev/packages`
+- Pi homepage: `https://pi.dev/`
+- Pi packages docs: `https://pi.dev/docs/latest/packages`
+- Pi extensions docs: `https://pi.dev/docs/latest/extensions`
+- `pi-hermes-memory`: `https://pi.dev/packages/pi-hermes-memory`
+- `pi-memory`: `https://pi.dev/packages/pi-memory`
+- `pi-memctx`: `https://pi.dev/packages/pi-memctx`
+- `pi-context-manager`: `https://pi.dev/packages/pi-context-manager`
+- `pi-subagents`: `https://pi.dev/packages/pi-subagents`
+- `pi-agents-team`: `https://pi.dev/packages/pi-agents-team`
+- `pi-until-done`: `https://pi.dev/packages/pi-until-done`
+- `@gonrocca/zero-pi`: `https://pi.dev/packages/%40gonrocca/zero-pi`
+- `@juicesharp/rpiv-pi`: `https://pi.dev/packages/%40juicesharp/rpiv-pi`
+- `@capyup/pi-specs`: `https://pi.dev/packages/%40capyup/pi-specs`
+- `pk-pi-hermes-evolve`: `https://www.npmjs.com/package/pk-pi-hermes-evolve`
+
+---
+
+*文档版本：v2.0*
 *更新记录：*
+- *v2.0：根据 Pi 社区插件调研，把路线从“从零实现”重构为“插件优先 + MiMo Provider + Dream/Distill 自研”。*
 - *v1.2：P0 新增 MiMo Provider 接入（API Key + OAuth）作为前置任务；M1 交付物含 Provider。*
-- *v1.1：合入 `XIAOMI-MiMo-code` 调研成果（P1 双 backend + 增量提取、P4 worktree+Coordinator、P5 自动 Dream）。所有源自该项目的设计均以 `[源自 XIAOMI-MiMo-code:<文件>]` 标注，便于追溯。*
+- *v1.1：合入 `XIAOMI-MiMo-code` 调研成果（P1 双 backend + 增量提取、P4 worktree+Coordinator、P5 自动 Dream）。*
