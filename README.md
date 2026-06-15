@@ -28,8 +28,9 @@ Pi contributes the hard infrastructure — the agent loop, tree-based session pe
 |----------|------|------|
 | **[earendil-works/pi](https://github.com/earendil-works/pi)** | The underlying kernel. This repo forks from it and reuses its agent runtime, TUI, multi-provider LLM API, session management, and extension system. | [pi.dev](https://pi.dev) |
 | **[XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code)** | The design blueprint. The core capabilities reimplemented here — memory, checkpointing, Compose, Dream/Distill — are modeled on MiMoCode. | [mimo.xiaomi.com](https://mimo.xiaomi.com/en/mimocode) |
+| **XIAOMI-MiMo-code** (local reference impl) | A source of inspiration. Several designs — memory recall without SQLite (LLM-selector fallback), incremental memory extraction, triple-gated auto-Dream, worktree isolation — were drawn from studying this implementation. | — |
 
-Sincere thanks to both upstream projects. Without Pi's engineering foundation and MiMoCode's product insight, this experiment would not be possible.
+Sincere thanks to the above projects. Without Pi's engineering foundation, MiMoCode's product insight, and the design inspiration from XIAOMI-MiMo-code, this experiment would not be possible. In the development plan, every design originating from XIAOMI-MiMo-code is tagged `[源自 XIAOMI-MiMo-code:<file>]` for traceability.
 
 ## Design philosophy
 

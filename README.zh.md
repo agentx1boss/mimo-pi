@@ -28,8 +28,9 @@ Pi 提供了 agent loop、会话树持久化、上下文压缩(compaction)、扩
 |------|------|------|
 | **[earendil-works/pi](https://github.com/earendil-works/pi)** | 底层内核。本仓库 fork 自此,复用其 agent runtime、TUI、多 Provider LLM API、会话管理与扩展系统 | [pi.dev](https://pi.dev) |
 | **[XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code)** | 设计蓝本。本项目的记忆、检查点、Compose、Dream/Distill 等核心能力,均以此为参照重新实现 | [mimo.xiaomi.com](https://mimo.xiaomi.com/zh/mimocode) |
+| **XIAOMI-MiMo-code**(本地参考实现) | 灵感来源。记忆召回(无 SQLite 的 LLM-selector 降级路径)、增量记忆提取、自动 Dream 三重门控、worktree 隔离等设计思想,源自对该实现的调研 | — |
 
-衷心感谢这两个上游项目。没有 Pi 的工程基础和 MiMoCode 的产品洞察,这个实验无从谈起。
+衷心感谢以上项目。没有 Pi 的工程基础、MiMoCode 的产品洞察,以及 XIAOMI-MiMo-code 的设计启发,这个实验无从谈起。开发计划中所有源自 XIAOMI-MiMo-code 的设计均以 `[源自 XIAOMI-MiMo-code:<文件>]` 标注,便于追溯。
 
 ## 设计理念
 

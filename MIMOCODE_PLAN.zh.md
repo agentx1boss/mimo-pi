@@ -82,14 +82,20 @@ packages/coding-agent/src/extensions/mimo/
 
 ### 任务
 
-- [ ] **1.1 SQLite FTS5 存储层**（`shared/memory-store.ts`）
-  - 表结构：`memories(id, kind, title, body, tags, project, created_at, updated_at, hit_count)`
-  - FTS5 虚拟表：`memories_fts` 索引 `title + body + tags`
-  - 方法：`add() / search(query, limit) / update() / delete() / list() / vacuum()`
-  - 数据库路径：`.mimo/memory.db`（项目级），可配置为全局
+- [ ] **1.1 存储抽象层 + 双实现**（`shared/memory-store.ts`）
+  - 先定义 `MemoryStore` 接口：`add() / search(query, budget) / update() / delete() / list() / vacuum()`
+  - **主实现 `SqliteFts5Store`**：
+    - 表结构：`memories(id, kind, title, body, tags, project, created_at, updated_at, hit_count)`
+    - FTS5 虚拟表：`memories_fts` 索引 `title + body + tags`
+    - 数据库路径：`.mimo/memory.db`（项目级），可配置为全局
+  - **备选实现 `LlmSelectorStore`**（无 SQLite 依赖的降级路径 `[源自 XIAOMI-MiMo-code: src/memdir/findRelevantMemories.ts]`）：
+    - 纯文件 + 一次轻量 LLM side-query；扫描记忆文件 header（`{filename, description}`），把「query + 清单 manifest」发给便宜小模型，让它选 top-K 相关条目
+    - 适用场景：容器/只读 fs、SQLite 不可用、记忆条目少（<50）时质量甚至优于关键词检索
+    - 用 Pi 的 `complete()` 实现独立 LLM 调用
+  - 通过配置 `memory.backend: "sqlite" | "llm-selector"` 切换；默认 sqlite，失败自动降级
 - [ ] **1.2 记忆注入钩子**（`memory/extension.ts`）
   - 监听 `session_start`（reason 为 `startup` / `resume`）
-  - 从最近一条用户消息提取查询词，调 `memoryStore.search()` 取 top-K
+  - 从最近一条用户消息提取查询词，调 `memoryStore.search()` 取 top-K（`search` 内部按 backend 走 FTS5 或 LLM-selector）
   - **预算化注入**：用 `estimateTokens()` 累加，超 budget（默认 4000 token）就截断；按 `kind`（规则 > 决策 > 笔记）和 `hit_count` 排序
   - 用 `appendCustomMessageEntry("mimo-memory", ...)` 注入为系统上下文
 - [ ] **1.3 记忆工具**（供 LLM 调用）
@@ -97,24 +103,30 @@ packages/coding-agent/src/extensions/mimo/
   - `memory_search`：检索记忆
   - `memory_update` / `memory_delete`
   - 每个工具的 `details` 持久化操作日志，支持分支重建
-- [ ] **1.4 MEMORY.md 双向同步**
+- [ ] **1.5 MEMORY.md 双向同步**
   - 启动时若 `.mimo/MEMORY.md` 存在则导入到 SQLite
   - 每次 `memory_save` / `memory_delete` 同步写回 `MEMORY.md`（人类可读）
-- [ ] **1.5 测试**：单元测试覆盖 add/search/budget 截断；e2e 测试「保存记忆 → 新会话 → 记忆被注入」。
+- [ ] **1.6 增量记忆提取**（`memory/extractor.ts`）`[源自 XIAOMI-MiMo-code: src/services/extractMemories/extractMemories.ts]`
+  - 挂到 `turn_end` 事件：每轮对话结束后，用独立 LLM（便宜小模型）判断「这轮有什么新知识值得持久化」
+  - 通过 `memory_save` 工具写入；与 P2 的 compaction 检查点互补——**1.6 是细粒度增量、低成本；P2 是低频全局快照**
+  - 关键优化（借鉴上游）：fork 当前会话消息历史做提取，可共享父会话 prompt cache，几乎零额外 token 成本
+- [ ] **1.7 测试**：单元测试覆盖 add/search/budget 截断（两个 backend 都要覆盖）；e2e 测试「保存记忆 → 新会话 → 记忆被注入」。
 
 ### 验收标准
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-1.1 | `.mimo/memory.db` 创建成功，FTS5 表可查 | `sqlite3 .mimo/memory.db ".tables"` 显示 `memories_fts` |
+| AC-1.1 | `MemoryStore` 接口有两个实现且都能 recall：sqlite 模式下 `.mimo/memory.db` 含 `memories_fts` 表 | `sqlite3 .mimo/memory.db ".tables"`；切到 `llm-selector` 模式重跑，记忆仍生效 |
 | AC-1.2 | 跨会话记忆生效：A 会话保存「项目用 Bun」，新开 B 会话问依赖管理，agent 知道用 Bun | 手动 e2e：save → `/new` → 提问 → 答案含 Bun |
 | AC-1.3 | Token budget 生效：注入总 token 不超过配置上限（+10% 容差） | 注入后打印实际 token，断言 ≤ budget×1.1 |
-| AC-1.4 | `MEMORY.md` 与 SQLite 内容一致 | save 后读 MEMORY.md，包含刚存的条目 |
+| AC-1.4 | `MEMORY.md` 与 store 内容一致 | save 后读 MEMORY.md，包含刚存的条目 |
 | AC-1.5 | 分支安全：`/fork` 后两分支记忆状态独立 | fork → 一边 save → 切回另一边 → 不含该条目 |
+| AC-1.6 | 每轮结束自动提取增量记忆（1.6） | 跑一轮有知识含量的对话 → turn_end 后 memory.db 多了对应条目 |
 
 ### 关键参考（Pi 现有资产）
 - **直接借鉴**：`pi-memctx`（官方记忆包，Markdown packs 方式）——我们的 FTS5 是其增强版
-- API：`session_start` 事件、`appendCustomMessageEntry`、`estimateTokens()`（from `core/compaction`）
+- **备选借鉴** `[源自 XIAOMI-MiMo-code]`：`src/memdir/findRelevantMemories.ts`（LLM-as-selector，无 SQLite 降级方案）；`src/services/extractMemories/extractMemories.ts`（fork-agent 增量提取）
+- API：`session_start` 事件、`appendCustomMessageEntry`、`estimateTokens()`（from `core/compaction`）、`complete()`（from `pi-ai`）
 - token 计数：`examples/extensions/custom-compaction.ts` 里 `tokensBefore` 的计算方式
 
 ---
@@ -221,6 +233,10 @@ packages/coding-agent/src/extensions/mimo/
     - 每个子 agent 配置：`{ name, task, tools[], model, systemPrompt }`
   - **生命周期追踪**：主 agent 通过 `tool_update` 回调实时看到子 agent 进度
   - **后台执行**：长任务可后台跑，主 agent 不阻塞
+  - **备选架构 Coordinator 模式** `[源自 XIAOMI-MiMo-code: src/coordinator/, docs/agent/coordinator-and-swarm.mdx]`：一个主控协调器只给 `Agent`/`SendMessage`/`TaskStop` 三个工具，多个全工具 worker 并行；用 `<task-notification>` XML 做 agent 间通信。适合「一个主控调度多个长期 worker」场景；与 spawn 模式按场景二选一
+- [ ] **4.1.1 Worktree 隔离** `[源自 XIAOMI-MiMo-code: docs/agent/worktree-isolation.mdx]`
+  - 并行模式下，每个改代码的子 agent 跑在独立 git worktree，避免文件编辑冲突
+  - 完成后用 `git merge`（或 cherry-pick）合并回主 worktree；这是并行子智能体能真正改代码的关键配套
 - [ ] **4.2 内置 agent 目录**（借鉴 subagent 示例的 `agents/` frontmatter 发现）
   - `checkpoint-writer`：P2 检查点的子 agent（生成结构化快照）
   - `code-reviewer`：Compose 的代码审查 agent
@@ -248,14 +264,16 @@ packages/coding-agent/src/extensions/mimo/
 | AC-4.2 | 链式模式：前一个 agent 输出被 `{previous}` 占位替换 | chain 模式跑 A→B，B 的输入含 A 输出 |
 | AC-4.3 | 主 agent 在子 agent 执行时收到 `tool_update` 实时进度 | 子 agent 输出时，主 agent TUI 显示增量 |
 | AC-4.4 | 后台子 agent 不阻塞主 agent | 启动后台子任务，主 agent 可继续对话 |
-| AC-4.5 | `/compose` 能跑通一个最小 spec（单文件改动） | 给一个"添加 hello() 函数"的 spec，全流程跑通且测试过 |
-| AC-4.6 | Compose 各阶段有明确 UI 反馈 | TUI 显示当前阶段（规划/执行/审查...） |
-| AC-4.7 | checkpoint-writer 子 agent 与 P2 集成 | Compose 流程中途断开，resume 后能续上 |
+| AC-4.5 | 并行改代码的子 agent 在独立 worktree 不冲突（4.1.1） | 并行跑两个都改同一文件的子 agent，都能完成且可合并 |
+| AC-4.6 | `/compose` 能跑通一个最小 spec（单文件改动） | 给一个"添加 hello() 函数"的 spec，全流程跑通且测试过 |
+| AC-4.7 | Compose 各阶段有明确 UI 反馈 | TUI 显示当前阶段（规划/执行/审查...） |
+| AC-4.8 | checkpoint-writer 子 agent 与 P2 集成 | Compose 流程中途断开，resume 后能续上 |
 
 ### 关键参考（Pi 现有资产）
 - **直接借鉴**：`examples/extensions/subagent/`（完整子进程编排，含 single/parallel/chain 三模式）
 - **直接借鉴**：`examples/extensions/git-merge-and-resolve.ts`（Compose 合并阶段）
 - **直接借鉴**：`examples/extensions/plan-mode/`（mode 注册范例）
+- **备选借鉴** `[源自 XIAOMI-MiMo-code]`：`src/coordinator/`（Coordinator/Swarm 编排范式）；`docs/agent/worktree-isolation.mdx`（并行子 agent 的 worktree 隔离）
 - API：`spawn` from `node:child_process`、`registerFlag`、`ctx.ui.custom`（自定义 UI 组件）
 
 ---
@@ -284,6 +302,13 @@ packages/coding-agent/src/extensions/mimo/
   - LLM 判断现有记忆中哪些已过时（如「用了 React 16」但代码已是 18）
   - 输出候选删除清单，**需用户确认**（`ctx.ui.confirm`）后删除
 - [ ] **5.4 `/dream` 命令**：聚合上述，带进度 UI，输出「新增 N 条 / 合并 M 条 / 清理 K 条」
+- [ ] **5.4.1 自动 Dream（三重门控）** `[源自 XIAOMI-MiMo-code: src/services/autoDream/autoDream.ts]`
+  - 不仅有手动 `/dream`，还要支持**自动触发**：`session_start` 时检查门控，通过则后台 fork agent 跑 consolidation
+  - 门控顺序（从最便宜到最贵，逐一短路）：
+    1. **时间门**：距上次 consolidate ≥ `dream.auto.minHours`（默认 24h，一次 stat）
+    2. **会话门**：自上次 consolidate 后新增 transcript 数 ≥ `dream.auto.minSessions`（默认 5）
+    3. **锁门**：没有其他进程正在 consolidate（PID 锁，多窗口/多实例安全）
+  - consolidation 复用 5.2 提取 + 5.3 清理的逻辑，只是无人值守触发
 
 ### 任务（Distill）
 
@@ -305,10 +330,11 @@ packages/coding-agent/src/extensions/mimo/
 | AC-5.2 | 提取的知识写入 memory.db 且 MEMORY.md 同步 | dream 后查 SQLite + MEMORY.md，条目新增 |
 | AC-5.3 | 相似知识被合并而非重复插入 | 先手动 save 一条类似记忆，dream 后该条被更新而非新增 |
 | AC-5.4 | 过时清理需用户确认，不会静默删除 | dream 触发清理时弹 confirm，取消则不删 |
-| AC-5.5 | `/distill` 能识别重复工具调用序列 | 构造多次相同工作流的测试会话，distill 能发现 |
-| AC-5.6 | 打包出的 skill 落在 staging，`/distill-apply` 后才进 `.pi/skills/` | 打包后检查 staging，apply 后检查 skills 目录 |
-| AC-5.7 | 生成的 skill 可被 Pi 正常加载调用 | apply 后新会话能触发该 skill |
-| AC-5.8 | 所有 LLM 调用用独立可配置模型（避免烧主模型 token） | 配置 `dream.model` / `distill.model`，日志验证 |
+| AC-5.5 | 自动 Dream 在三重门控通过时自动触发（5.4.1） | 模拟「距上次≥24h + 新增≥5 会话」启动，自动跑 consolidation；时间或会话不足时不触发 |
+| AC-5.6 | `/distill` 能识别重复工具调用序列 | 构造多次相同工作流的测试会话，distill 能发现 |
+| AC-5.7 | 打包出的 skill 落在 staging，`/distill-apply` 后才进 `.pi/skills/` | 打包后检查 staging，apply 后检查 skills 目录 |
+| AC-5.8 | 生成的 skill 可被 Pi 正常加载调用 | apply 后新会话能触发该 skill |
+| AC-5.9 | 所有 LLM 调用用独立可配置模型（避免烧主模型 token） | 配置 `dream.model` / `distill.model`，日志验证 |
 
 ### 关键参考（Pi 现有资产）
 - **无直接对应**（这是 MiMoCode 独有）——但可复用：
@@ -317,6 +343,7 @@ packages/coding-agent/src/extensions/mimo/
   - `complete()` from `pi-ai`（独立 LLM 调用）
   - `docs/skills.md`（skill 格式规范）
   - `examples/extensions/subagent/agents.ts`（agent frontmatter 格式）
+- **备选借鉴** `[源自 XIAOMI-MiMo-code]`：`src/services/autoDream/autoDream.ts`（三重门控自动 consolidation）；`src/services/autoDream/consolidationPrompt.ts`（4 阶段反思 prompt）；`src/skills/bundled/skillify`（自我生成 skill 的元技能，可与 distill 合并）
 
 ---
 
@@ -391,7 +418,7 @@ P6 收尾打磨 (1-2周)
 | 子智能体用 spawn 子进程模式开销大 | 中 | 中 | P4 优先验证；备选：用 SDK 的 `createAgentSession` in-process（牺牲隔离性换性能） |
 | Compose 与 Pi 的 mode 系统耦合深，可能需改内核 | 中 | 高 | P4 早期 spike；若必须改内核，评估是否接受 fork 维护成本 |
 | Dream/Distill 的 LLM 调用成本高 | 中 | 中 | 默认用便宜小模型；加 dry-run 模式只扫描不调 LLM；用户确认后才提取 |
-| SQLite 在某些环境（容器/只读 fs）不可用 | 低 | 中 | memory-store 抽象接口，备选纯 JSON 文件实现（无 FTS5，降级为线性检索） |
+| SQLite 在某些环境（容器/只读 fs）不可用 | 低 | 中 | 已有明确降级路径：`MemoryStore` 抽象接口下提供 `LlmSelectorStore` 备选实现（无 SQLite 依赖，纯文件 + 一次 LLM side-query）`[源自 XIAOMI-MiMo-code]`；失败时自动降级 |
 | Pi 的 token 计数（`estimateTokens`）不够准 | 中 | 低 | 预算化注入留 10% 容差；关键场景用真实 tokenizer 校准 |
 
 ---
@@ -400,10 +427,11 @@ P6 收尾打磨 (1-2周)
 
 1. **每阶段都要有可演示的闭环**，不要积累太多未验证代码。
 2. **优先借鉴 Pi 自带示例**，它们是官方维护的、跟版本同步的，比自己造轮子更稳。
-3. **SQLite FTS5 和裁判模型是 MiMoCode 的护城河**，这两块要重点打磨，不能图省事降级。
+3. **SQLite FTS5 和裁判模型是 MiMoCode 的护城河**，这两块要重点打磨；但 FTS5 已有 LLM-selector 降级路径，不必强依赖。
 4. **不改 Pi 内核**。所有功能通过 Extension 实现，保持与上游 merge 的能力。
 5. **验收标准必须可自动验证的就自动化**（vitest），只能手动验证的写清操作步骤。
 
 ---
 
-*文档版本：v1.0 · 基于本地 `pi/` fork（`@earendil-works/pi-coding-agent@0.79.3`）*
+*文档版本：v1.1 · 基于本地 `mimo-pi/` fork（`@earendil-works/pi-coding-agent@0.79.3`）*
+*更新记录：v1.1 合入 `XIAOMI-MiMo-code` 调研成果（P1 双 backend + 增量提取、P4 worktree+Coordinator、P5 自动 Dream）。所有源自该项目的设计均以 `[源自 XIAOMI-MiMo-code:<文件>]` 标注，便于追溯。*
