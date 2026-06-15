@@ -56,6 +56,9 @@ packages/coding-agent/src/extensions/mimo/   ← 规划中的 MiMo 扩展层
 
 下述能力均来自 MiMoCode 的设计,目标是作为 Pi Extension 重新实现:
 
+### MiMo Provider 接入(前置)
+把小米 MiMo 平台接入 Pi 的 `/login` 与模型体系——支持 **MiMo 平台 OAuth 登录**和 **MiMo API Key** 两种方式。这是所有后续功能开发测试的前置条件:记忆、检查点、Dream 等都用真实 MiMo 模型验证。基于 Pi 的 `registerProvider()` + `oauth` 机制实现。
+
 ### ⭐ 持久化记忆
 基于 SQLite FTS5 全文检索的跨会话记忆,在会话恢复时按 token 预算将相关记忆注入上下文。包括项目记忆(`MEMORY.md`)、会话检查点、笔记暂存与逐任务进展。让 agent 无需每次重新理解项目背景。
 

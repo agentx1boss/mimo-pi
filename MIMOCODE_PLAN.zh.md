@@ -50,21 +50,34 @@ packages/coding-agent/src/extensions/mimo/
 ## P0 — 工程基线（预计 2~3 天）
 
 ### 目标
-搭建开发闭环，确保后续每个阶段都能「改 → 编译 → 跑通 → 验收」。
+搭建开发闭环，确保后续每个阶段都能「改 → 编译 → 跑通 → 验收」。**前置接入 MiMo Provider**——后续记忆、检查点、Dream 等所有功能都要用真实 MiMo 模型验证，所以先把模型通路打通。
 
 ### 任务
 
 - [ ] **0.1 项目骨架**：新建 `packages/coding-agent/src/extensions/mimo/` 目录与 `index.ts` 聚合入口（先空实现，只 `export default function(pi){}`）。
+- [ ] **0.MiMo MiMo Provider 接入**（`extensions/mimo/provider.ts`）—— 后续所有功能开发测试的前置条件
+  - **背景**：Pi 已内建多 Provider 能力（见 `docs/providers.md` / `docs/custom-provider.md`）。我们用 `pi.registerProvider()` 把小米 MiMo 平台接进来，让 `/login` 直接选 MiMo，后续记忆/checkpoint/Dream 等功能即可用真实 MiMo 模型验证。
+  - **方式 A：MiMo API Key**（最简，先行落地）
+    - `pi.registerProvider("mimo", { baseUrl: "https://platform.xiaomimimo.com/...", apiKey: "$MIMO_API_KEY", api: "openai-completions", models: [...] })`
+    - 用户通过环境变量 `MIMO_API_KEY` 或 `.pi/agent/auth.json` 提供 key
+    - 用 async factory 从远程 `/models` 端点拉取 MiMo 模型列表（动态、不写死）
+  - **方式 B：MiMo 平台 OAuth**（产品级体验，紧跟 A 之后）
+    - `oauth: { name, login(callbacks), refreshToken, getApiKey }`，集成进 Pi 原生 `/login` 流程
+    - 实现小米 OAuth 端点的授权码/device-code 交换 + token 刷新
+    - `modifyModels(models, credentials)` 按用户订阅/区域过滤可用模型
+  - 两种方式都注册同一个 provider id `mimo`，OAuth 优先；提供 key 就用 key，登录过就用 OAuth token
 - [ ] **0.2 构建链路验证**：跑通 `npm run build`（顶层 `packages/coding-agent`），确认 dist 产物正常。
-- [ ] **0.3 扩展加载验证**：用 `pi -e ./src/extensions/mimo/index.ts` 启动，确认无报错；写一个 `session_start` 钩子打印日志验证事件通路。
+- [ ] **0.3 扩展加载验证**：用 `pi -e ./src/extensions/mimo/index.ts` 启动，确认无报错；写一个 `session_start` 钩子打印日志验证事件通路；**用 MiMo 模型发一条消息验证端到端通路**。
 - [ ] **0.4 测试基线**：在 `test/mimo/` 下放一个最小 vitest 用例，确认 `npm test` 能跑到。
-- [ ] **0.5 配置位预留**：确认 Pi 的 `.pi/settings.json` 能承载 MiMo 配置（`memory.enabled`、`memory.budget` 等），预留 schema。
+- [ ] **0.5 配置位预留**：确认 Pi 的 `.pi/settings.json` 能承载 MiMo 配置（`memory.enabled`、`memory.budget` 等），预留 schema；MiMo Provider 配置（`provider.mimo.baseUrl` / OAuth client id 等）也纳入。
 
 ### 验收标准
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
 | AC-0.1 | `mimo/` 目录与 `index.ts` 存在，`npm run build` 通过 | `npm run build` 退出码 0 |
+| AC-0.MiMo-A | 设 `MIMO_API_KEY` 后，MiMo provider 出现在模型列表，能成功调用 MiMo 模型 | `pi` 启动后 `/models` 可见 mimo，发一条消息收到 MiMo 回复 |
+| AC-0.MiMo-B | `/login` 选 MiMo，走 OAuth 拿到 token 并自动刷新；过期后无感续期 | `/login` → 选 MiMo → 完成；重启后 token 仍有效；模拟过期后自动 refresh |
 | AC-0.2 | `pi -e ./mimo/index.ts` 能启动，`session_start` 日志可见 | 启动后发送任意消息，控制台打印 MiMo 加载日志 |
 | AC-0.3 | `npm test` 跑通至少 1 个 mimo 用例 | 测试报告中 mimo 用例 pass |
 | AC-0.4 | 配置 schema 落地在 settings 文档与代码中 | 代码里有类型定义 + docs 有说明 |
@@ -72,6 +85,9 @@ packages/coding-agent/src/extensions/mimo/
 ### 关键参考
 - `pi/packages/coding-agent/docs/development.md`
 - `pi/packages/coding-agent/docs/extensions.md` §Quick Start
+- `pi/packages/coding-agent/docs/providers.md`（subscription / API key / auth file 三种机制）
+- `pi/packages/coding-agent/docs/custom-provider.md`（`registerProvider` 完整参考 + `oauth` 登录流 + async factory 远程拉 models）
+- 示例：`examples/extensions/custom-provider-anthropic/`、`examples/extensions/custom-provider-gitlab-duo/`（OAuth 完整范例）
 
 ---
 
@@ -377,8 +393,8 @@ packages/coding-agent/src/extensions/mimo/
 ## 总览：阶段依赖与里程碑
 
 ```
-P0 工程基线 (2-3天)
-  │
+P0 工程基线 + MiMo Provider (2-3天)
+  │   └─(前置: MiMo API Key + OAuth,后续功能用它验证)
   ▼
 P1 持久化记忆 (1-2周) ──────────────┐ ⭐核心
   │                                  │
@@ -402,7 +418,7 @@ P6 收尾打磨 (1-2周)
 
 | 里程碑 | 完成阶段 | 交付物 | 累计预计 |
 |--------|---------|--------|----------|
-| **M1 可用原型** | P0 + P1 | 「带跨会话记忆的 Pi」 | ~2.5 周 |
+| **M1 可用原型** | P0 + P1 | MiMo Provider + 「带跨会话记忆的 Pi」 | ~2.5 周 |
 | **M2 记忆闭环** | + P2 + P3 | 记忆 + 检查点 + 任务 + Goal | ~6 周 |
 | **M3 编排能力** | + P4 | 子智能体 + Compose | ~8.5 周 |
 | **M4 自我进化** | + P5 | Dream + Distill（完整差异化） | ~11 周 |
@@ -420,6 +436,7 @@ P6 收尾打磨 (1-2周)
 | Dream/Distill 的 LLM 调用成本高 | 中 | 中 | 默认用便宜小模型；加 dry-run 模式只扫描不调 LLM；用户确认后才提取 |
 | SQLite 在某些环境（容器/只读 fs）不可用 | 低 | 中 | 已有明确降级路径：`MemoryStore` 抽象接口下提供 `LlmSelectorStore` 备选实现（无 SQLite 依赖，纯文件 + 一次 LLM side-query）`[源自 XIAOMI-MiMo-code]`；失败时自动降级 |
 | Pi 的 token 计数（`estimateTokens`）不够准 | 中 | 低 | 预算化注入留 10% 容差；关键场景用真实 tokenizer 校准 |
+| 小米 MiMo OAuth 端点细节未公开 / 可变动 | 中 | 中 | 方式 A（API Key）先落地保证可用；OAuth 作为增强体验，跟进官方文档；token 刷新失败时回退提示重新登录 |
 
 ---
 
@@ -433,5 +450,7 @@ P6 收尾打磨 (1-2周)
 
 ---
 
-*文档版本：v1.1 · 基于本地 `mimo-pi/` fork（`@earendil-works/pi-coding-agent@0.79.3`）*
-*更新记录：v1.1 合入 `XIAOMI-MiMo-code` 调研成果（P1 双 backend + 增量提取、P4 worktree+Coordinator、P5 自动 Dream）。所有源自该项目的设计均以 `[源自 XIAOMI-MiMo-code:<文件>]` 标注，便于追溯。*
+*文档版本：v1.2 · 基于本地 `mimo-pi/` fork（`@earendil-works/pi-coding-agent@0.79.3`）*
+*更新记录：*
+- *v1.2：P0 新增 MiMo Provider 接入（API Key + OAuth）作为前置任务；M1 交付物含 Provider。*
+- *v1.1：合入 `XIAOMI-MiMo-code` 调研成果（P1 双 backend + 增量提取、P4 worktree+Coordinator、P5 自动 Dream）。所有源自该项目的设计均以 `[源自 XIAOMI-MiMo-code:<文件>]` 标注，便于追溯。*

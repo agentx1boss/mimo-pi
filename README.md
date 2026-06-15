@@ -56,6 +56,9 @@ packages/coding-agent/src/extensions/mimo/   ← planned MiMo extension layer
 
 The capabilities below all originate from MiMoCode's design, to be reimplemented as Pi Extensions:
 
+### MiMo provider integration (prerequisite)
+Integrates the Xiaomi MiMo platform into Pi's `/login` and model system — supporting both **MiMo platform OAuth login** and **MiMo API key**. This is a prerequisite for developing and testing all subsequent features: memory, checkpointing, Dream, etc. are all validated with real MiMo models. Built on Pi's `registerProvider()` + `oauth` mechanism.
+
 ### ⭐ Persistent memory
 Cross-session memory based on SQLite FTS5 full-text search, with relevant memories injected into context by token budget on session resume. Includes project memory (`MEMORY.md`), session checkpoints, notes scratchpad, and per-task progress — so the agent never has to relearn the project background.
 
