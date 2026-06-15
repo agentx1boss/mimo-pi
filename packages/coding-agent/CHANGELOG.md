@@ -5,6 +5,7 @@
 ### Added
 
 - Added first-run interactive theme detection from the terminal background.
+- Added inherited Xiaomi MiMo browser authorization for `/login xiaomi`.
 
 ### Fixed
 

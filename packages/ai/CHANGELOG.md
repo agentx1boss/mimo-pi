@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Xiaomi MiMo browser authorization as an OAuth provider for the built-in `xiaomi` provider.
+
 ### Fixed
 
 - Fixed OpenCode/OpenCode Go completion models that reject `prompt_cache_retention` to omit long-retention cache fields when `cacheRetention` is `long` ([#5702](https://github.com/earendil-works/pi/issues/5702)).
