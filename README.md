@@ -1,99 +1,114 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-</p>
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+<h1 align="center">mimo-pi</h1>
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+<p align="center"><strong>Rebuilding MiMoCode's core capabilities on the Pi kernel — an AI coding agent with cross-session memory and self-evolution.</strong></p>
+
+<p align="center">
+  English | <a href="README.zh.md">中文</a>
+</p>
 
 ---
 
-# Pi Agent Harness Mono Repo
+## What is this
 
-This is the home of the pi agent harness project including our self extensible coding agent.
+`mimo-pi` is an experimental project that aims to reimplement the core differentiating capabilities of [MiMoCode](https://github.com/XiaomiMiMo/MiMo-Code) on top of the minimal kernel of [Pi](https://github.com/earendil-works/pi).
 
-* **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
+Rather than starting from scratch, it answers a single question:
 
-To learn more about pi:
+> **What would it look like if every piece of MiMoCode's "cross-session memory + intelligent context management + self-evolution" were expressed as a set of Pi Extensions?**
 
-* [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+Pi contributes the hard infrastructure — the agent loop, tree-based session persistence, context compaction, and extension hooks. MiMoCode contributes the design philosophy — the memory system, checkpointing, and Dream/Distill — the ideas that make an agent "understand your project better the more you use it." `mimo-pi` brings the two together.
 
-## Share your OSS coding agent sessions
+### Status
 
-If you use pi or other coding agents for open source work, please share your sessions.
+> ⚠️ **Early in development.** This repository is currently a fork of Pi with a full development plan ([`MIMOCODE_PLAN.zh.md`](./MIMOCODE_PLAN.zh.md), in Chinese) attached, but no feature implementation has started yet. The capabilities described below are **target goals**, not shipped features.
 
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
+## Relationship to upstreams
 
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
+| Upstream | Role | Link |
+|----------|------|------|
+| **[earendil-works/pi](https://github.com/earendil-works/pi)** | The underlying kernel. This repo forks from it and reuses its agent runtime, TUI, multi-provider LLM API, session management, and extension system. | [pi.dev](https://pi.dev) |
+| **[XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code)** | The design blueprint. The core capabilities reimplemented here — memory, checkpointing, Compose, Dream/Distill — are modeled on MiMoCode. | [mimo.xiaomi.com](https://mimo.xiaomi.com/en/mimocode) |
 
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
+Sincere thanks to both upstream projects. Without Pi's engineering foundation and MiMoCode's product insight, this experiment would not be possible.
 
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
+## Design philosophy
 
-I regularly publish my own `pi-mono` work sessions here:
+**Pi is a "minimal kernel + extensible harness,"** and every piece of MiMoCode's differentiation can be expressed as a set of Pi Extensions. So `mimo-pi`'s strategy is:
 
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
+- **Do not modify the Pi kernel** — all MiMo capabilities are built as Extensions, preserving the ability to merge from upstream.
+- **Borrow, don't copy** — Pi's bundled example extensions (`custom-compaction.ts` / `todo.ts` / `subagent/` / `handoff.ts`) already cover a lot of the functional scaffolding. What we add is MiMoCode's engineering quality: SQLite FTS5, token-budgeted injection, an independent judge model, and subagent orchestration.
+- **One feature = one Extension** — each capability is independently loadable, and can also be enabled together via an aggregate entry point.
 
-## All Packages
+```
+packages/coding-agent/src/extensions/mimo/   ← planned MiMo extension layer
+├── memory/        # Persistent memory (SQLite FTS5 + budgeted injection)
+├── checkpoint/    # Checkpointing + context reconstruction
+├── tasks/         # Tree-shaped task tracking
+├── goal/          # Goal + judge-model stop conditions
+├── subagent/      # Subagent orchestration
+├── compose/       # Specs-driven orchestration mode
+├── dream/         # Dream & Distill self-evolution
+└── shared/        # Shared utilities (store / token counting / prompt templates)
+```
 
-| Package | Description |
-|---------|-------------|
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+## Target capabilities (planned)
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+The capabilities below all originate from MiMoCode's design, to be reimplemented as Pi Extensions:
 
-## Permissions & Containerization
+### ⭐ Persistent memory
+Cross-session memory based on SQLite FTS5 full-text search, with relevant memories injected into context by token budget on session resume. Includes project memory (`MEMORY.md`), session checkpoints, notes scratchpad, and per-task progress — so the agent never has to relearn the project background.
 
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
+### Checkpointing + context reconstruction
+Before context compaction, a sub-model generates a structured checkpoint snapshot. When context nears its limit, the context is reconstructed from the latest checkpoint, project memory, and task progress — letting the agent continue the current task seamlessly.
 
-If you need stronger boundaries, containerize or sandbox Pi. See [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for three patterns:
+### Task tracking
+A tree-shaped task system (T1, T1.1, T1.2…) whose state is persisted in session entries, with native support for branching (`/fork`). Automatically linked to the checkpoint system, so progress survives session resume.
 
-- **OpenShell**: run the whole `pi` process in a policy-controlled sandbox.
-- **Gondolin extension**: keep `pi` and provider auth on the host while routing built-in tools and `!` commands into a local Linux micro-VM.
-- **Plain Docker**: run the whole `pi` process in a local container for simple isolation.
+### Goal / judge stop conditions
+`/goal` sets a stop condition for the session. When the agent wants to stop, an **independent judge model** evaluates the conversation to determine whether the condition is truly satisfied — preventing "optimistic stopping" during autonomous work.
 
-## Contributing
+### Subagent orchestration
+The primary agent spawns subagents on demand, supporting single, parallel, and chained modes, sharing session context, with lifecycle tracking and background execution.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).
+### Compose orchestration mode
+A structured, specs-driven development flow: planning → execution → code review → TDD → debugging → validation → merge, orchestrating the full lifecycle from spec to delivery.
+
+### ⭐ Dream & Distill (self-evolution)
+- **`/dream`** — scans recent session trajectories, extracts persistent knowledge into project memory, and prunes stale entries.
+- **`/distill`** — discovers repetitive manual workflows from recent work and packages high-confidence candidates into reusable skills / subagents / commands.
+
+This is MiMoCode's biggest differentiator relative to the Pi ecosystem — making the agent genuinely "stronger with use."
+
+## Roadmap
+
+See [`MIMOCODE_PLAN.zh.md`](./MIMOCODE_PLAN.zh.md) for the full plan (with task checklists and acceptance criteria per phase, in Chinese). A brief overview:
+
+| Phase | Content | Milestone |
+|-------|---------|-----------|
+| P0 | Engineering baseline (skeleton / build / test loop) | |
+| P1 | ⭐ Persistent memory (SQLite FTS5 + budgeted injection) | **M1** Usable prototype |
+| P2 | Checkpointing + context reconstruction | |
+| P3 | Task tracking + Goal judge stop | **M2** Memory loop |
+| P4 | Subagent orchestration + Compose | **M3** Orchestration |
+| P5 | ⭐ Dream & Distill self-evolution | **M4** Self-evolution |
+| P6 | Multi-mode switching / polish / docs | **M5** Release-ready |
 
 ## Development
 
+This repository is a fork of the Pi monorepo and follows the same development workflow:
+
 ```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build        # Build all packages
-npm run check        # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+npm install --ignore-scripts   # Install dependencies
+npm run build                  # Build all packages
+npm run check                  # Lint, format, and type check
+./test.sh                      # Run tests
+./pi-test.sh                   # Run pi from sources
 ```
 
-## Supply-chain hardening
-
-We treat npm dependency changes as reviewed code changes.
-
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
-- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the root lockfile, to pin transitive deps for npm users.
-- Release smoke tests use `npm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Shrinkwrap generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
+Package documentation lives in [`packages/coding-agent/docs/`](./packages/coding-agent/docs/).
 
 ## License
 
-MIT
+MIT, inherited from the upstream Pi project.
+
+Use of this repository is additionally subject to Pi's usage restrictions and trademark policy.
