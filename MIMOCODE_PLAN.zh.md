@@ -13,7 +13,7 @@
 - `MIMOCODE_PLAN.zh.md` 从“从零实现计划”重构为“社区插件优先的选型与差异化实施计划”。
 - P1-P4 的大部分能力不再默认自研，先通过社区插件评测和组合获得。
 - 仍建议自研的核心差异化：
-  - **MiMo Provider**：接入 Xiaomi MiMo API Key / OAuth，作为模型通路和产品身份基础。
+  - **MiMo 增强层**：基础 Xiaomi MiMo provider 已在 Pi 中内置；后续自研重点是 Token Plan 用量展示、动态模型列表、MiMo 平台账户体系和兼容性包装。
   - **Dream/Distill 自我进化闭环**：会话扫描、知识沉淀、重复 workflow 挖掘、生成 skill/subagent/command、人工审核应用。
 - 旧计划中的架构设计和验收标准保留为 fallback 标准：如果社区插件无法通过验收，再按原设计补齐或重写。
 
@@ -55,7 +55,7 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 | Subagents | `pi-subagents`, `pi-agents-team`, `pi-crew`, `@gotgenes/pi-subagents`, `pi-fast-subagent`, `simple-subs`, `pi-mesh` | single/parallel/chain/background、RPC workers、live TUI、worktree/async orchestration、peer messaging。 | 不从零做 P4 subagent runtime；先选稳定实现。 |
 | Compose / SDD workflow | `@gonrocca/zero-pi`, `@juicesharp/rpiv-pi`, `@capyup/pi-specs`, `@ifi/pi-spec`, `pi-code-planner`, `pi-mission-control`, `nightmanager` | explore -> plan -> build -> review/verdict、TDD evidence、spec store、PR/issue integration、resume。 | Compose 不从零写；优先评测 `zero-pi` 与 `rpiv-pi`。 |
 | Dream / Distill | `pi-hermes-memory`, `pi-context-manager`, `@gonrocca/zero-pi`, `pk-pi-hermes-evolve`, `@cad0p/pi-napkin` | 有 auto-consolidation、tool result distill、skill auto-learning、反思式改进，但未确认完整 MiMo 式闭环。 | 保留为自研主线。社区插件只能作为参考或底层。 |
-| Provider / OAuth | `pi-oauth`, `pi-supergrok`, `pi-vertex-ai-provider`, `tokenfactory-pi`, custom provider docs | 通用 OAuth / provider extension 模式存在。未确认 Xiaomi MiMo 专用 provider。 | 仍做 MiMo Provider。 |
+| Provider / MiMo 平台能力 | Pi 内置 `xiaomi`、`xiaomi-token-plan-cn`、`xiaomi-token-plan-ams`、`xiaomi-token-plan-sgp`；社区 `@lesetong/pi-mimo`、`@ersintarhan/pi-toolkit`、`pi-mimo-provider` | 基础模型通路已有；社区插件已有动态模型、多区域、usage 查询、cache/stream workaround 等参考实现。 | 不从零做基础 provider；改做 MiMo 增强层。 |
 
 ### 1.3 重点候选插件
 
@@ -71,6 +71,9 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 | `@gonrocca/zero-pi` | Compose/SDD 候选 | `/forge`，explore/plan/build/veredicto，TDD evidence，per-phase model autotune，run memory，skill auto-learning。 | 语言/流程是否符合本项目；与 MiMo Provider、记忆插件是否可组合。 |
 | `@juicesharp/rpiv-pi` | Compose/SDD 候选 | discover/research/design/plan/implement/validate pipeline，12 个 specialist subagents。 | 依赖 `@tintinweb/pi-subagents` 版本；artifact 格式是否可复用。 |
 | `pk-pi-hermes-evolve` | Self-evolution 参考 | Hermes Agent Self-Evolution 风格，反思改进 skills/prompts/instruction files。 | 是否真实覆盖 Dream/Distill；是否可借鉴 staging/apply 闸门。 |
+| `@lesetong/pi-mimo` | MiMo provider 增强参考 | 支持多区域、`auth.json`、动态模型发现、OpenAI/Anthropic 协议。 | peer deps 指向旧 `@mariozechner/*` 包，需验证与当前 `@earendil-works/*` 兼容性。 |
+| `@ersintarhan/pi-toolkit` | MiMo provider/usage 参考 | 包含 `xiaomi-mimo` provider、Anthropic cache/stream 修复、Token Plan usage 查询。 | 工具包范围较大，不适合默认引入；可抽取实现思路。 |
+| `pi-mimo-provider` | 简单 MiMo provider 参考 | 注册 MiMo models，使用 OpenAI-compatible API。 | 与内置 provider 能力重复，env/provider id 不一致，优先级低。 |
 
 ### 1.4 关键差距
 
@@ -80,6 +83,7 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 2. **插件间状态不互通**：memory、goal、workflow、subagent 可能各写各的目录，Dream/Distill 需要统一读取。
 3. **安全和质量不可默认信任**：社区包下载量不等于可纳入默认配置，必须审源码和 pin 版本。
 4. **Dream/Distill 闭环未确认成熟实现**：已有 auto-consolidation、context distill、skill auto-learning，但缺少完整的“会话轨迹 -> 候选知识/流程 -> staging -> 人工审核 -> 生效 -> 后续调用”闭环。
+5. **MiMo 平台能力超出基础 provider**：内置 provider 能完成模型调用，但 Token Plan 用量、动态模型目录、平台账户登录/绑定仍需要单独增强层。
 
 ---
 
@@ -125,29 +129,45 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 - 更新本文件的候选矩阵和决策。
 - 如果需要单独沉淀，新增 `docs/research/pi-plugin-evaluation.md`。
 
-### R1 — MiMo Provider 接入（预计 2~4 天）
+### R1 — MiMo Provider 验证与增强层（预计 3~6 天）
 
-目标：补齐社区生态缺口，把 Xiaomi MiMo 平台作为 Pi provider 接入。
+目标：不重复实现 Pi 已内置的基础模型通路，在其上补齐后续产品目标需要的 MiMo 平台能力。
 
 任务：
 
-- [ ] 阅读并确认当前 `docs/custom-provider.md`、`docs/providers.md` 和示例 provider。
-- [ ] 实现项目本地 MiMo provider extension：
-  - API Key 路径优先；
-  - provider id 使用 `mimo`；
-  - 模型列表尽量动态拉取，无法拉取时使用明确的最小 fallback；
-  - 不硬编码用户凭证。
-- [ ] OAuth 只在官方端点和授权流程确认后实现；未确认前不阻塞 R2。
-- [ ] 写最小 provider 测试或 smoke script。
+- [ ] 验证 Pi 内置 Xiaomi providers：
+  - `xiaomi` + `XIAOMI_API_KEY`；
+  - `xiaomi-token-plan-cn` + `XIAOMI_TOKEN_PLAN_CN_API_KEY`；
+  - `xiaomi-token-plan-ams` + `XIAOMI_TOKEN_PLAN_AMS_API_KEY`；
+  - `xiaomi-token-plan-sgp` + `XIAOMI_TOKEN_PLAN_SGP_API_KEY`。
+- [ ] 验证默认模型与模型解析：
+  - `mimo-v2.5-pro` 默认模型；
+  - `/model xiaomi/mimo-v2.5-pro`；
+  - 至少一个 Token Plan regional model。
+- [ ] 调研并记录可复用实现：
+  - `@lesetong/pi-mimo`：动态模型发现、多区域、`auth.json`；
+  - `@ersintarhan/pi-toolkit`：Token Plan usage、MiMo cache/stream workaround；
+  - `pi-mimo-provider`：简单 provider 参考，默认不采用。
+- [ ] 实现 MiMo enhancer extension，而不是重写基础 provider：
+  - `/mimo-usage`：展示 Token Plan 用量、余额、重置周期或官方接口能返回的等价信息；
+  - `/mimo-models-refresh`：从 MiMo 平台动态刷新模型目录，失败时回退到 Pi 内置 metadata；
+  - `/mimo-account`：显示当前账户/区域/认证方式；只展示必要信息，不打印密钥；
+  - `/mimo-doctor`：检查 MiMo provider、env、区域、模型列表、usage API 可用性。
+- [ ] 平台账户体系单独设计：
+  - API Key / Token Plan env vars 作为第一阶段；
+  - `auth.json` 兼容作为第二阶段；
+  - OAuth 或平台登录只在官方端点、授权范围和刷新机制确认后实现。
 
 验收标准：
 
 | 编号 | 验收项 | 验证方式 |
 |------|--------|----------|
-| AC-R1.1 | `MIMO_API_KEY` 路径可用 | Pi 模型列表出现 `mimo` provider。 |
-| AC-R1.2 | 可完成一次真实模型调用 | 用 MiMo 模型发一条低成本 prompt，得到回复。 |
-| AC-R1.3 | provider 不影响其他 providers | 不设置 `MIMO_API_KEY` 时 Pi 正常启动，其他模型可用。 |
-| AC-R1.4 | OAuth 状态明确 | 实现或记录“因官方端点不明确而暂缓”。 |
+| AC-R1.1 | 内置 `xiaomi` provider 可用 | 用 `xiaomi/mimo-v2.5-pro` 完成一次低成本真实调用。 |
+| AC-R1.2 | 至少一个 Token Plan regional provider 可用 | 用 `xiaomi-token-plan-*/mimo-v2.5-pro` 完成一次真实调用。 |
+| AC-R1.3 | `/mimo-usage` 可展示 Token Plan 用量 | 使用官方或已审查的接口读取 usage；失败时输出明确原因。 |
+| AC-R1.4 | `/mimo-models-refresh` 有 fallback | 动态拉取失败时仍使用 Pi 内置模型 metadata。 |
+| AC-R1.5 | `/mimo-account` 不泄露密钥 | 输出只包含 provider、区域、认证状态和脱敏标识。 |
+| AC-R1.6 | 平台账户体系边界明确 | API Key、`auth.json`、OAuth 分阶段记录；未确认官方 OAuth 不阻塞 R2。 |
 
 ### R2 — 社区插件组合成可用原型（预计 3~5 天）
 
@@ -291,7 +311,7 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 
 | 旧阶段 | 新定位 | 触发自研条件 |
 |--------|--------|--------------|
-| P0 工程基线 + Provider | 保留，其中 Provider 仍执行 | MiMo provider 无社区可用实现。 |
+| P0 工程基线 + Provider | 保留验收，不从零做基础 provider | Pi 内置 provider 不能满足基础模型调用，才重写 provider。 |
 | P1 持久化记忆 | 降级为 fallback | 候选 memory 插件不能项目隔离、不能预算注入、不能通过安全审查。 |
 | P2 检查点 + 上下文重建 | 降级为 fallback | context/compaction 插件不能在 compaction/resume 后稳定恢复任务状态。 |
 | P3 任务追踪 + Goal | 降级为 fallback | goal/task 插件不能分支安全、不能独立 judge、不能配置验证命令。 |
@@ -306,8 +326,8 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 1. **先做 R0，不写功能代码。**
    目标是用 evidence 决定插件栈，避免重复造轮子。
 
-2. **并行推进 R1 的 MiMo API Key provider。**
-   这是明确缺口，且后续所有 smoke 都能用真实 MiMo 模型验证。
+2. **并行推进 R1 的 MiMo provider 验证与增强层。**
+   基础模型通路先用 Pi 内置 provider；自研只覆盖 usage、动态模型、账户体系和 doctor。
 
 3. **R2 只做项目本地组合，不做全局默认安装。**
    所有包必须 pin version 或 git ref。
@@ -330,7 +350,8 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 | 社区插件下载量虚高或质量不稳 | 中 | 中 | 不以下载量作为唯一依据；检查测试、源码、issue、release 频率。 |
 | Dream/Distill 误提取错误知识 | 中 | 高 | staging-first、source evidence、confidence、人工 apply、可回滚。 |
 | 自动 Dream 打扰主任务 | 中 | 中 | 三重门控、后台锁、默认只 staging、不自动写长期记忆。 |
-| MiMo OAuth 官方细节不清 | 中 | 中 | API Key 先落地；OAuth 明确端点后再做。 |
+| MiMo 平台接口变化或未公开 | 中 | 中 | 内置 provider 做基础 fallback；usage/model/account 接口单独降级。 |
+| MiMo OAuth 官方细节不清 | 中 | 中 | API Key / Token Plan env vars 先落地；OAuth 明确端点后再做。 |
 
 ---
 
@@ -352,6 +373,8 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 - Pi homepage: `https://pi.dev/`
 - Pi packages docs: `https://pi.dev/docs/latest/packages`
 - Pi extensions docs: `https://pi.dev/docs/latest/extensions`
+- Pi providers docs: `https://pi.dev/docs/latest/providers`
+- Pi Xiaomi model catalog: `https://pi.dev/models?provider=xiaomi`
 - `pi-hermes-memory`: `https://pi.dev/packages/pi-hermes-memory`
 - `pi-memory`: `https://pi.dev/packages/pi-memory`
 - `pi-memctx`: `https://pi.dev/packages/pi-memctx`
@@ -363,11 +386,15 @@ Pi packages 可以执行代码并影响 agent 行为，等同本机代码执行�
 - `@juicesharp/rpiv-pi`: `https://pi.dev/packages/%40juicesharp/rpiv-pi`
 - `@capyup/pi-specs`: `https://pi.dev/packages/%40capyup/pi-specs`
 - `pk-pi-hermes-evolve`: `https://www.npmjs.com/package/pk-pi-hermes-evolve`
+- `@lesetong/pi-mimo`: `https://pi.dev/packages/%40lesetong/pi-mimo`
+- `@ersintarhan/pi-toolkit`: `https://pi.dev/packages/%40ersintarhan/pi-toolkit`
+- `pi-mimo-provider`: `https://pi.dev/packages/pi-mimo-provider`
 
 ---
 
-*文档版本：v2.0*
+*文档版本：v2.1*
 *更新记录：*
+- *v2.1：根据后续目标，把 MiMo Provider 从“基础通路自研”调整为“内置 provider 验证 + Token Plan 用量、动态模型、账户体系增强层”。*
 - *v2.0：根据 Pi 社区插件调研，把路线从“从零实现”重构为“插件优先 + MiMo Provider + Dream/Distill 自研”。*
 - *v1.2：P0 新增 MiMo Provider 接入（API Key + OAuth）作为前置任务；M1 交付物含 Provider。*
 - *v1.1：合入 `XIAOMI-MiMo-code` 调研成果（P1 双 backend + 增量提取、P4 worktree+Coordinator、P5 自动 Dream）。*
